@@ -1,0 +1,116 @@
+paths:
+  # Where the mirrored/published repo tree lives (portable drive mount or local path)
+  repo_root: /media/offlinerepo/OFFLINEREPO
+
+  # Optional: if set, "sync" will also rsync repo_root -> permanent_root
+  permanent_root: ""
+
+  # Base URL clients will use (your offline webserver)
+  publish_url_base: http://repo.local/repo
+
+global:
+  # Default architectures to include (used where supported)
+  architectures: [amd64]
+
+  # Keep last N APT snapshots per mirror (aptly)
+  keep_snapshots: 2
+
+containers:
+  # You will build these images once with the Dockerfiles below
+  debian_image: offline-repo/debian-apt:stable
+  fedora_image: offline-repo/fedora-rpm:latest
+
+apt:
+  - name: debian
+    enabled: true
+    mirrors:
+      - mirror_name: debian-trixie
+        # Upstream URL
+        url: http://deb.debian.org/debian
+        # APT distribution/suite
+        distribution: trixie
+        # Components
+        components: [main, contrib, non-free, non-free-firmware]
+        # Architectures (overrides global if set)
+        architectures: [amd64]
+      - mirror_name: debian-security-trixie
+        url: http://security.debian.org/debian-security
+        distribution: trixie-security
+        components: [main, contrib, non-free, non-free-firmware]
+        architectures: [amd64]
+
+  - name: ubuntu
+    enabled: true
+    mirrors:
+      - mirror_name: ubuntu-jammy
+        url: http://archive.ubuntu.com/ubuntu
+        distribution: jammy
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+      - mirror_name: ubuntu-jammy-updates
+        url: http://archive.ubuntu.com/ubuntu
+        distribution: jammy-updates
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+      - mirror_name: ubuntu-jammy-security
+        url: http://security.ubuntu.com/ubuntu
+        distribution: jammy-security
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+
+  - name: kali
+    enabled: false
+    mirrors:
+      - mirror_name: kali-rolling
+        url: http://http.kali.org/kali
+        distribution: kali-rolling
+        components: [main, contrib, non-free, non-free-firmware]
+        architectures: [amd64]
+
+  - name: proxmox
+    enabled: false
+    mirrors:
+      # Example for Proxmox on Debian bookworm (no-subscription)
+      - mirror_name: proxmox-trixie
+        url: http://download.proxmox.com/debian/pve
+        distribution: trixie
+        components: [pve-no-subscription]
+        architectures: [amd64]
+
+rpm:
+  - name: fedora
+    enabled: true
+    releasever: "43"
+    arch: x86_64
+    repos:
+      # Repo IDs must exist in your container's /etc/yum.repos.d
+      - repoid: fedora
+      - repoid: updates
+
+  - name: rocky
+    enabled: false
+    releasever: "9"
+    arch: x86_64
+    repos:
+      - repoid: baseos
+      - repoid: appstream
+      - repoid: extras
+
+  - name: rhel
+    enabled: false
+    releasever: "9"
+    arch: x86_64
+    repos:
+      - repoid: rhel-9-baseos-rpms
+      - repoid: rhel-9-appstream-rpms
+    notes: "RHEL mirroring requires entitlements/subscription access. Treat as special mode."
+
+apk:
+  - name: alpine
+    enabled: false
+    mirrors:
+      # rsync module names vary by mirror. http mirroring is also possible.
+      - mirror_name: alpine-v3.21-main
+        rsync_url: rsync://rsync.alpinelinux.org/alpine/v3.21/main
+      - mirror_name: alpine-v3.21-community
+        rsync_url: rsync://rsync.alpinelinux.org/alpine/v3.21/community

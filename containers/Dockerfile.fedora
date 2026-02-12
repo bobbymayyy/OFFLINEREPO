@@ -1,0 +1,13 @@
+FROM fedora:latest
+
+RUN dnf -y install \
+    dnf-plugins-core \
+    createrepo_c \
+    rsync \
+    curl \
+    ca-certificates \
+    bash \
+    python3 python3-pyyaml \
+  && dnf -y clean all
+
+WORKDIR /work

@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CFG="${CFG:-$HERE/config.yml}"
+
+log() { printf "%s\n" "$*" | tee -a "$HERE/logs/offline-repoctl.log" >/dev/null; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1" >&2; exit 1; }
+}
+
+detect_engine() {
+  if command -v podman >/dev/null 2>&1; then echo "podman"; return; fi
+  if command -v docker >/dev/null 2>&1; then echo "docker"; return; fi
+  echo "none"
+}
+
+py_get() {
+  # Usage: py_get 'paths.repo_root'
+  python3 - "$1" "$CFG" <<'PY'
+import sys, yaml
+path = sys.argv[1].split(".")
+cfg = yaml.safe_load(open(sys.argv[2],"r"))
+cur = cfg
+for p in path:
+  if cur is None: break
+  cur = cur.get(p) if isinstance(cur, dict) else None
+print("" if cur is None else cur)
+PY
+}
+
+py_bool_any_enabled() {
+  # Usage: py_bool_any_enabled 'apt' or 'rpm' or 'apk'
+  python3 - "$1" "$CFG" <<'PY'
+import sys, yaml
+k = sys.argv[1]
+cfg = yaml.safe_load(open(sys.argv[2],"r"))
+items = cfg.get(k, [])
+print("yes" if any(d.get("enabled", False) for d in items) else "no")
+PY
+}
+
+container_run() {
+  local image="$1"; shift
+  local engine; engine="$(detect_engine)"
+  [[ "$engine" != "none" ]] || { echo "Need podman or docker installed." >&2; exit 1; }
+
+  local repo_root; repo_root="$(py_get paths.repo_root)"
+  [[ -n "$repo_root" ]] || { echo "paths.repo_root is empty in config.yml" >&2; exit 1; }
+
+  mkdir -p "$HERE/logs" "$HERE/state" "$HERE/keys"
+  mkdir -p "$repo_root"/{apt,rpm,apk,logs,state,keys,config} || true
+
+  # Copy config into repo_root/config for portability (clients/admins can inspect)
+  cp -f "$CFG" "$repo_root/config/config.yml"
+
+  "$engine" run --rm -t \
+    -e CFG=/work/config.yml \
+    -e REPO_ROOT="$repo_root" \
+    -v "$CFG":/work/config.yml:ro \
+    -v "$HERE/bin":/work/bin:ro \
+    -v "$repo_root":"$repo_root":Z \
+    -w /work \
+    "$image" "$@"
+}
+
+sync_apt() {
+  local img; img="$(py_get containers.debian_image)"
+  [[ -n "$img" ]] || { echo "containers.debian_image missing" >&2; exit 1; }
+  container_run "$img" /work/bin/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"
+}
+
+sync_rpm() {
+  local img; img="$(py_get containers.fedora_image)"
+  [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
+  container_run "$img" /work/bin/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"
+}
+
+sync_apk() {
+  # Can run in either container, use fedora image by default
+  local img; img="$(py_get containers.fedora_image)"
+  [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
+  container_run "$img" /work/bin/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"
+}
+
+sync_permanent() {
+  local repo_root permanent
+  repo_root="$(py_get paths.repo_root)"
+  permanent="$(py_get paths.permanent_root)"
+
+  [[ -n "$permanent" ]] || return 0
+  need rsync
+
+  mkdir -p "$permanent"
+  rsync -aH --delete "$repo_root"/ "$permanent"/ |& tee -a "$HERE/logs/sync_permanent.log"
+}
+
+export_snippets() {
+  local base; base="$(py_get paths.publish_url_base)"
+  local repo_root; repo_root="$(py_get paths.repo_root)"
+
+  cat <<EOF
+# Base URL:
+#   $base
+#
+# Repo root on server filesystem:
+#   $repo_root
+#
+# APT clients (examples):
+#   Add a key to /usr/share/keyrings/offline-repo.gpg (you manage keys per upstream)
+#   Then add lines like:
+#     deb [signed-by=/usr/share/keyrings/offline-repo.gpg] $base/apt/debian bookworm main contrib non-free non-free-firmware
+#
+# RPM clients (example .repo):
+#   [fedora-updates-offline]
+#   name=Fedora Updates (offline)
+#   baseurl=$base/rpm/fedora/41/updates/
+#   enabled=1
+#   gpgcheck=0
+#
+# Alpine clients (/etc/apk/repositories):
+#   $base/apk/alpine/alpine-v3.21-main
+#   $base/apk/alpine/alpine-v3.21-community
+EOF
+}
+
+show_config() {
+  sed -n '1,200p' "$CFG"
+}
+
+edit_config() {
+  ${EDITOR:-nano} "$CFG"
+}
+
+sync_all() {
+  local any
+
+  any="$(py_bool_any_enabled apt)"
+  [[ "$any" == "yes" ]] && sync_apt
+
+  any="$(py_bool_any_enabled rpm)"
+  [[ "$any" == "yes" ]] && sync_rpm
+
+  any="$(py_bool_any_enabled apk)"
+  [[ "$any" == "yes" ]] && sync_apk
+
+  sync_permanent
+}
+
+tui() {
+  need dialog
+  while true; do
+    local choice
+    choice=$(dialog --clear --stdout --title "offline-repoctl" \
+      --menu "Portable multi-distro repo mirror" 0 0 0 \
+      1 "View current configuration" \
+      2 "Edit configuration" \
+      3 "Sync repos now (containers default)" \
+      4 "View logs (tail)" \
+      5 "Export client setup snippets" \
+      6 "Exit") || true
+
+    case "${choice:-6}" in
+      1) dialog --title "config.yml" --msgbox "$(show_config | head -n 400)" 0 0 ;;
+      2) edit_config ;;
+      3) dialog --infobox "Sync running... (check logs afterward)" 5 60; sync_all; dialog --msgbox "Sync complete." 6 40 ;;
+      4) dialog --title "logs/offline-repoctl.log" --msgbox "$(tail -n 200 "$HERE/logs/offline-repoctl.log" 2>/dev/null || echo '(no log yet)')" 0 0 ;;
+      5) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
+      6) clear; exit 0 ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  tui) tui ;;
+  sync) sync_all ;;
+  show-config) show_config ;;
+  edit-config) edit_config ;;
+  export-snippets) export_snippets ;;
+  *)
+    cat <<EOF
+Usage:
+  $0 tui
+  $0 sync
+  $0 show-config
+  $0 edit-config
+  $0 export-snippets
+
+Tips:
+  - Build images once:
+      podman build -t offline-repo/debian-apt:stable -f containers/Dockerfile.debian containers
+      podman build -t offline-repo/fedora-rpm:latest -f containers/Dockerfile.fedora containers
+  - Then run:
+      $0 tui
+EOF
+    ;;
+esac
