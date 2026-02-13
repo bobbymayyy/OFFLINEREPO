@@ -6,14 +6,24 @@ paths:
   permanent_root: ""
 
   # Base URL clients will use (your offline webserver)
-  publish_url_base: http://repo.local/repo
+  publish_url_base: http://repo.local/repo/
 
 global:
-  # Default architectures to include (used where supported)
-  architectures: [amd64]
+   # Default architectures to include (used where supported)
+   architectures: [amd64]
+ 
+   # Keep last N APT snapshots per mirror (aptly)
+   keep_snapshots: 2
 
-  # Keep last N APT snapshots per mirror (aptly)
-  keep_snapshots: 2
+   # Default keyrings for aptly mirror signature verification.
+   # These should exist INSIDE the debian aptly container at runtime.
+   # (You can override per-distro or per-mirror.)
+   apt_keyrings_default:
+     - /usr/share/keyrings/debian-archive-keyring.gpg
+     - /usr/share/keyrings/ubuntu-archive-keyring.gpg
+     - /usr/share/keyrings/proxmox-release.gpg
+     - /usr/share/keyrings/kali-archive-keyring.gpg
+     - /usr/share/keyrings/cuda-archive-keyring.gpg
 
 containers:
   # You will build these images once with the Dockerfiles below
@@ -21,65 +31,90 @@ containers:
   fedora_image: offline-repo/fedora-rpm:latest
 
 apt:
-  - name: debian
-    enabled: true
-    mirrors:
-      - mirror_name: debian-trixie
-        # Upstream URL
-        url: http://deb.debian.org/debian
-        # APT distribution/suite
-        distribution: trixie
-        # Components
-        components: [main, contrib, non-free, non-free-firmware]
-        # Architectures (overrides global if set)
-        architectures: [amd64]
-      - mirror_name: debian-security-trixie
-        url: http://security.debian.org/debian-security
-        distribution: trixie-security
-        components: [main, contrib, non-free, non-free-firmware]
-        architectures: [amd64]
-
-  - name: ubuntu
-    enabled: true
-    mirrors:
-      - mirror_name: ubuntu-jammy
-        url: http://archive.ubuntu.com/ubuntu
-        distribution: jammy
-        components: [main, restricted, universe, multiverse]
-        architectures: [amd64]
-      - mirror_name: ubuntu-jammy-updates
-        url: http://archive.ubuntu.com/ubuntu
-        distribution: jammy-updates
-        components: [main, restricted, universe, multiverse]
-        architectures: [amd64]
-      - mirror_name: ubuntu-jammy-security
-        url: http://security.ubuntu.com/ubuntu
-        distribution: jammy-security
-        components: [main, restricted, universe, multiverse]
-        architectures: [amd64]
-
-  - name: kali
-    enabled: false
-    mirrors:
-      - mirror_name: kali-rolling
-        url: http://http.kali.org/kali
-        distribution: kali-rolling
-        components: [main, contrib, non-free, non-free-firmware]
-        architectures: [amd64]
-
-  - name: proxmox
-    enabled: false
-    mirrors:
-      # Example for Proxmox on Debian bookworm (no-subscription)
-      - mirror_name: proxmox-trixie
-        url: http://download.proxmox.com/debian/pve
-        distribution: trixie
-        components: [pve-no-subscription]
-        architectures: [amd64]
+   - name: debian
+     enabled: false
+     # Optional: tighten default keyrings for this distro (merged after global defaults)
+     apt_keyrings:
+       - /usr/share/keyrings/debian-archive-keyring.gpg
+     mirrors:
+       - mirror_name: debian-trixie
+         # Upstream URL
+         url: https://deb.debian.org/debian/
+         # APT distribution/suite
+         distribution: trixie
+         # Components
+         components: [main, contrib, non-free, non-free-firmware]
+         # Architectures (overrides global if set)
+         architectures: [amd64]
+       - mirror_name: debian-security-trixie
+         url: https://security.debian.org/debian-security/
+         distribution: trixie-security
+         components: [main, contrib, non-free, non-free-firmware]
+         architectures: [amd64]
+ 
+   - name: ubuntu
+     enabled: false
+     apt_keyrings:
+       - /usr/share/keyrings/ubuntu-archive-keyring.gpg
+     mirrors:
+       - mirror_name: ubuntu-jammy
+         url: https://archive.ubuntu.com/ubuntu/
+         distribution: jammy
+         components: [main, restricted, universe, multiverse]
+         architectures: [amd64]
+       - mirror_name: ubuntu-jammy-updates
+         url: https://archive.ubuntu.com/ubuntu/
+         distribution: jammy-updates
+         components: [main, restricted, universe, multiverse]
+         architectures: [amd64]
+       - mirror_name: ubuntu-jammy-security
+         url: https://security.ubuntu.com/ubuntu/
+         distribution: jammy-security
+         components: [main, restricted, universe, multiverse]
+         architectures: [amd64]
+ 
+   - name: kali
+     enabled: false
+     apt_keyrings:
+       - /usr/share/keyrings/kali-archive-keyring.gpg
+     mirrors:
+       - mirror_name: kali-rolling
+         url: https://http.kali.org/kali/
+         distribution: kali-rolling
+         components: [main, contrib, non-free, non-free-firmware]
+         architectures: [amd64]
+ 
+   - name: proxmox
+     enabled: false
+     apt_keyrings:
+       - /usr/share/keyrings/proxmox-release.gpg
+     mirrors:
+       # Example for Proxmox on Debian bookworm (no-subscription)
+       - mirror_name: proxmox-trixie
+         url: https://download.proxmox.com/debian/pve/
+         distribution: trixie
+         components: [pve-no-subscription]
+         architectures: [amd64]
+ 
+   # NVIDIA CUDA APT repo (add if you want it mirrored via aptly)
+   - name: cuda
+     enabled: false
+     mirrors:
+       - mirror_name: cuda-debian12
+         url: https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/
+         # NVIDIA uses a flat repo; aptly wants a "distribution" argument.
+         # "/" works well for these style repos in aptly mirror create.
+         distribution: /
+         components: []
+         architectures: [amd64]
+         keyrings:
+           - /usr/share/keyrings/cuda-archive-keyring.gpg
+         # Make this mirror only trust the CUDA keyring (instead of global defaults)
+         keyrings_mode: replace
 
 rpm:
   - name: fedora
-    enabled: true
+    enabled: false
     releasever: "43"
     arch: x86_64
     repos:

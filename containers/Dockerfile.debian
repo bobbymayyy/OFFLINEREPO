@@ -2,12 +2,45 @@ FROM debian:stable-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Base tools + aptly + Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg gpg \
-    rsync bash wget \
+    ca-certificates curl wget \
+    gnupg gpgv \
+    rsync bash \
     coreutils findutils \
     aptly \
     python3 python3-yaml \
+    debian-archive-keyring \
+    ubuntu-keyring \
   && rm -rf /var/lib/apt/lists/*
+
+# --- Kali keyring (official) ---
+# Kali rotated signing keys; recommended keyring download:
+#   wget https://archive.kali.org/archive-keyring.gpg -O /usr/share/keyrings/kali-archive-keyring.gpg
+RUN wget -q https://archive.kali.org/archive-keyring.gpg \
+    -O /usr/share/keyrings/kali-archive-keyring.gpg
+
+# --- Proxmox release keyring (official wiki pattern) ---
+# Proxmox provides a release keyring per Debian codename (bookworm/trixie, etc.)
+RUN set -eux; \
+  . /etc/os-release; \
+  codename="${VERSION_CODENAME}"; \
+  # Try codename-specific keyring first; fall back to bookworm if you build on something Proxmox doesn't publish yet.
+  url="https://enterprise.proxmox.com/debian/proxmox-release-${codename}.gpg"; \
+  if ! wget -q -O /usr/share/keyrings/proxmox-release.gpg "$url"; then \
+    wget -q -O /usr/share/keyrings/proxmox-release.gpg "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg"; \
+  fi
+
+# --- NVIDIA CUDA repo keyring ---
+# NVIDIA recommends installing cuda-keyring, which drops /usr/share/keyrings/cuda-archive-keyring.gpg
+RUN set -eux; \
+  . /etc/os-release; \
+  distro="$(echo "${ID}${VERSION_ID}" | tr -d .)"; \
+  # Example: debian13, debian12. Must match your CUDA repo URL scheme.
+  deb="cuda-keyring_1.1-1_all.deb"; \
+  base="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64"; \
+  wget -q -O "/tmp/${deb}" "${base}/${deb}"; \
+  dpkg -i "/tmp/${deb}"; \
+  rm -f "/tmp/${deb}"
 
 WORKDIR /work
