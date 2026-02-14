@@ -25,9 +25,12 @@ global:
     - /usr/share/keyrings/kali-archive-keyring.gpg
     - /usr/share/keyrings/cuda-archive-keyring.gpg
 
+  # aptly custom repo signing key
+  aptly_gpg_key: "YOUR_FULL_FINGERPRINT"
+
   # Error handling control knobs
   fail_fast: false
-  cmd_timeout_sec: 0   # 0 = no timeout; set to e.g. 7200 for 2h   
+  cmd_timeout_sec: 0   # 0 = no timeout; set to e.g. 7200 for 2h
 
 containers:
   # You will build these images once with the Dockerfiles below
