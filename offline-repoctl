@@ -59,7 +59,7 @@ container_run() {
     -e CFG=/work/config.yml \
     -e REPO_ROOT="$repo_root" \
     -v "$CFG":/work/config.yml:ro \
-    -v "$HERE/bin":/work/bin:ro \
+    -v "$HERE/lib":/work/lib:ro \
     -v "$repo_root":"$repo_root":Z \
     -w /work \
     "$image" "$@"
@@ -68,20 +68,20 @@ container_run() {
 sync_apt() {
   local img; img="$(py_get containers.debian_image)"
   [[ -n "$img" ]] || { echo "containers.debian_image missing" >&2; exit 1; }
-  container_run "$img" /work/bin/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"
+  container_run "$img" /work/lib/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"
 }
 
 sync_rpm() {
   local img; img="$(py_get containers.fedora_image)"
   [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
-  container_run "$img" /work/bin/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"
+  container_run "$img" /work/lib/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"
 }
 
 sync_apk() {
   # Can run in either container, use fedora image by default
   local img; img="$(py_get containers.fedora_image)"
   [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
-  container_run "$img" /work/bin/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"
+  container_run "$img" /work/lib/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"
 }
 
 sync_permanent() {
