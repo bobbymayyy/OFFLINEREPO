@@ -9,21 +9,25 @@ paths:
   publish_url_base: http://repo.local/repo/
 
 global:
-   # Default architectures to include (used where supported)
-   architectures: [amd64]
+  # Default architectures to include (used where supported)
+  architectures: [amd64]
  
-   # Keep last N APT snapshots per mirror (aptly)
-   keep_snapshots: 2
+  # Keep last N APT snapshots per mirror (aptly)
+  keep_snapshots: 2
 
-   # Default keyrings for aptly mirror signature verification.
-   # These should exist INSIDE the debian aptly container at runtime.
-   # (You can override per-distro or per-mirror.)
-   apt_keyrings_default:
-     - /usr/share/keyrings/debian-archive-keyring.gpg
-     - /usr/share/keyrings/ubuntu-archive-keyring.gpg
-     - /usr/share/keyrings/proxmox-release.gpg
-     - /usr/share/keyrings/kali-archive-keyring.gpg
-     - /usr/share/keyrings/cuda-archive-keyring.gpg
+  # Default keyrings for aptly mirror signature verification.
+  # These should exist INSIDE the debian aptly container at runtime.
+  # (You can override per-distro or per-mirror.)
+  apt_keyrings_default:
+    - /usr/share/keyrings/debian-archive-keyring.gpg
+    - /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    - /usr/share/keyrings/proxmox-release.gpg
+    - /usr/share/keyrings/kali-archive-keyring.gpg
+    - /usr/share/keyrings/cuda-archive-keyring.gpg
+
+  # Error handling control knobs
+  fail_fast: false
+  cmd_timeout_sec: 0   # 0 = no timeout; set to e.g. 7200 for 2h   
 
 containers:
   # You will build these images once with the Dockerfiles below
