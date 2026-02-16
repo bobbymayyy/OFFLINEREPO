@@ -57,10 +57,10 @@ container_run() {
 
   "$engine" run --rm -t \
     -e CFG=/work/config.yml \
-    -e REPO_ROOT="$repo_root" \
+    -e REPO_ROOT=/repo \
     -v "$CFG":/work/config.yml:ro \
     -v "$HERE/lib":/work/lib:ro \
-    -v "$repo_root":"$repo_root":Z \
+    -v "$repo_root":/repo:Z \
     -w /work \
     "$image" "$@"
 }

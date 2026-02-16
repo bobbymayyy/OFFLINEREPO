@@ -54,7 +54,7 @@ apt:
          # Architectures (overrides global if set)
          architectures: [amd64]
        - mirror_name: debian-security-trixie
-         url: https://security.debian.org/debian-security/
+         url: https://deb.debian.org/debian-security/
          distribution: trixie-security
          components: [main]
          architectures: [amd64]
