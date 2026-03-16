@@ -6,6 +6,27 @@ CFG="${CFG:-$HERE/config.yml}"
 
 log() { printf "%s\n" "$*" | tee -a "$HERE/logs/offline-repoctl.log" >/dev/null; }
 
+if command -v apt >/dev/null 2>&1; then
+  sudo apt update
+  sudo apt install -y \
+    podman \
+    rsync \
+    dialog \
+    python3 \
+    python3-yaml
+elif command -v dnf >/dev/null 2>&1; then
+  sudo dnf update
+  sudo dnf install -y \
+    podman \
+    rsync \
+    dialog \
+    python3 \
+    python3-pyyaml
+else
+  echo "Unsupported host: need apt-get or dnf" >&2
+  exit 1
+fi
+
 need() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1" >&2; exit 1; }
 }
@@ -52,15 +73,22 @@ container_run() {
   mkdir -p "$HERE/logs" "$HERE/state" "$HERE/keys"
   mkdir -p "$repo_root"/{apt,rpm,apk,logs,state,keys,config} || true
 
-  # Copy config into repo_root/config for portability (clients/admins can inspect)
+  # Copy config into repo_root/config for portability
   cp -f "$CFG" "$repo_root/config/config.yml"
+
+  local repo_mount="$repo_root:/repo"
+  if [[ "$engine" == "podman" ]] && command -v getenforce >/dev/null 2>&1; then
+    if [[ "$(getenforce 2>/dev/null || true)" != "Disabled" ]]; then
+      repo_mount="$repo_root:/repo:Z"
+    fi
+  fi
 
   "$engine" run --rm -t \
     -e CFG=/work/config.yml \
     -e REPO_ROOT=/repo \
     -v "$CFG":/work/config.yml:ro \
     -v "$HERE/lib":/work/lib:ro \
-    -v "$repo_root":/repo:Z \
+    -v "$repo_mount" \
     -w /work \
     "$image" "$@"
 }

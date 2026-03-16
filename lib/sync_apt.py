@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, yaml, subprocess, time, pathlib, random, re
+import os, sys, yaml, subprocess, time, pathlib, random, re, json
 from typing import List, Optional, Dict, Any
 
 
@@ -29,12 +29,7 @@ def run(
     timeout: Optional[int] = None,
     env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess:
-    """
-    Run command with optional retries, capturing output for better error reporting.
-    Retries only happen when stderr/stdout looks like a transient network error.
-    """
     attempt = 0
-    last_exc = None
     while True:
         attempt += 1
         print("+", " ".join(cmd), flush=True)
@@ -50,7 +45,6 @@ def run(
             if cp.returncode == 0:
                 return cp
 
-            # Non-zero
             if retries > 0 and attempt <= (retries + 1) and _is_retryable(cp.stderr, cp.stdout):
                 delay = retry_sleep * (2 ** (attempt - 1)) + random.uniform(0, 1.5)
                 print(
@@ -63,7 +57,6 @@ def run(
                 continue
 
             if check:
-                # Print useful context then raise
                 print(f"! command failed exit={cp.returncode}", file=sys.stderr, flush=True)
                 if cp.stdout:
                     print("! stdout:\n" + cp.stdout[-2000:], file=sys.stderr, flush=True)
@@ -72,8 +65,7 @@ def run(
                 raise subprocess.CalledProcessError(cp.returncode, cmd, output=cp.stdout, stderr=cp.stderr)
             return cp
 
-        except subprocess.TimeoutExpired as e:
-            last_exc = e
+        except subprocess.TimeoutExpired:
             if attempt > retries + 1:
                 raise
             delay = retry_sleep * (2 ** (attempt - 1)) + random.uniform(0, 1.5)
@@ -99,19 +91,13 @@ def dedupe(seq):
     return out
 
 def compute_keyrings(cfg, distro_cfg, mirror_cfg):
-    """
-    Keyring resolution order:
-      1) global.apt_keyrings_default
-      2) distro.apt_keyrings
-      3) mirror.keyrings (append or replace via mirror.keyrings_mode)
-    """
     g = cfg.get("global", {}) or {}
     base = []
     base += _norm_list(g.get("apt_keyrings_default"))
     base += _norm_list(distro_cfg.get("apt_keyrings"))
 
     mirror_krs = _norm_list(mirror_cfg.get("keyrings"))
-    mode = (mirror_cfg.get("keyrings_mode") or "append").lower()  # append|replace
+    mode = (mirror_cfg.get("keyrings_mode") or "append").lower()
 
     if mirror_krs:
         if mode == "replace":
@@ -136,11 +122,6 @@ def ensure_paths_exist(paths: List[str], ctx: str):
         raise FileNotFoundError(f"{ctx}: missing keyring files: {missing}")
 
 def setup_gpg(repo_root: str, cfg: Dict[str, Any]) -> str:
-    """
-    Make GNUPGHOME persistent on the drive and import the signing key from:
-      <repo_root>/keys/repo-signing-private.asc
-    Returns gpg_key fingerprint/id to use for aptly publish -gpg-key=...
-    """
     g = cfg.get("global", {}) or {}
     gpg_key = g.get("aptly_gpg_key")
     if not gpg_key:
@@ -155,15 +136,35 @@ def setup_gpg(repo_root: str, cfg: Dict[str, Any]) -> str:
     if not key_file.exists():
         raise FileNotFoundError(f"Signing key not found: {key_file} (expected on removable drive)")
 
-    # Import (safe to repeat)
     run(["gpg", "--batch", "--import", str(key_file)], check=True, retries=2, retry_sleep=2, timeout=60)
-
-    # Sanity check that a secret key exists
     cp = run(["gpg", "--batch", "--list-secret-keys", "--keyid-format", "LONG"], check=True, timeout=30)
     if "sec" not in (cp.stdout or ""):
-        raise RuntimeError("No secret keys available in GNUPGHOME after import (gpg --list-secret-keys shows none)")
+        raise RuntimeError("No secret keys available in GNUPGHOME after import")
 
     return str(gpg_key)
+
+def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
+    state_root = pathlib.Path(repo_root) / "state" / "aptly"
+    state_root.mkdir(parents=True, exist_ok=True)
+
+    g = cfg.get("global", {}) or {}
+    architectures = g.get("architectures", []) or []
+
+    aptly_cfg = {
+        "rootDir": str(state_root),
+        "downloadConcurrency": int(g.get("aptly_download_concurrency", 4)),
+        "downloadSpeedLimit": int(g.get("aptly_download_speed_limit_kbps", 0)),
+        "architectures": architectures,
+        "gpgProvider": "gpg",
+        "skipLegacyPool": True,
+    }
+
+    cfg_path = pathlib.Path(repo_root) / "state" / "aptly.conf"
+    cfg_path.write_text(json.dumps(aptly_cfg, indent=2) + "\n")
+    return cfg_path
+
+def aptly_cmd(aptly_cfg_path: pathlib.Path, *args: str) -> List[str]:
+    return ["aptly", f"-config={aptly_cfg_path}"] + list(args)
 
 def main():
     cfg_path = os.environ.get("CFG", "/work/config.yml")
@@ -175,22 +176,18 @@ def main():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f) or {}
 
-    # Portability roots
-    aptly_root = pathlib.Path(repo_root) / "state" / "aptly"
-    aptly_root.mkdir(parents=True, exist_ok=True)
-    os.environ["APTLY_ROOT_DIR"] = str(aptly_root)
-
-    publish_root = pathlib.Path(repo_root) / "apt"
-    publish_root.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(repo_root, "apt").mkdir(parents=True, exist_ok=True)
+    pathlib.Path(repo_root, "state").mkdir(parents=True, exist_ok=True)
 
     g = cfg.get("global", {}) or {}
     keep_n = int(g.get("keep_snapshots", 3))
-    fail_fast = bool(g.get("fail_fast", False))  # optional
+    fail_fast = bool(g.get("fail_fast", False))
     cmd_timeout = int(g.get("cmd_timeout_sec", 0)) or None
 
-    # Set up signing (import key, ensure secret key exists)
+    aptly_cfg_path = write_aptly_config(repo_root, cfg)
+
     gpg_key = setup_gpg(repo_root, cfg)
-    pub_gpg_flags = [f"-gpg-key={gpg_key}"]
+    pub_gpg_flags = [f"-gpg-key={gpg_key}", "-batch"]
 
     apt_sets = cfg.get("apt", []) or []
     failures = []
@@ -212,7 +209,6 @@ def main():
             arch_flag = ",".join(archs) if archs else ""
 
             try:
-                # Keyrings for verifying upstream
                 krs = compute_keyrings(cfg, distro, m)
                 if not krs:
                     raise RuntimeError(
@@ -222,46 +218,51 @@ def main():
                 ensure_paths_exist(krs, f"mirror {mirror_name}")
                 kr_flags = keyring_flags(krs)
 
-                # Create mirror if missing
-                res = run(["aptly", "mirror", "show", mirror_name], check=False, timeout=cmd_timeout)
+                res = run(aptly_cmd(aptly_cfg_path, "mirror", "show", mirror_name), check=False, timeout=cmd_timeout)
                 if res.returncode != 0:
-                    cmd = ["aptly", "mirror", "create"] + kr_flags
+                    cmd = aptly_cmd(aptly_cfg_path, "mirror", "create", *kr_flags)
                     if arch_flag:
                         cmd += ["-architectures=" + arch_flag]
                     cmd += [mirror_name, url, dist] + comps
                     run(cmd, timeout=cmd_timeout)
 
-                # Update mirror (retryable)
                 run(
-                    ["aptly", "mirror", "update"] + kr_flags + [mirror_name],
+                    aptly_cmd(aptly_cfg_path, "mirror", "update", *kr_flags, mirror_name),
                     retries=5,
                     retry_sleep=10,
                     timeout=cmd_timeout,
                 )
 
-                # Snapshot
                 ts = time.strftime("%Y%m%d-%H%M%S")
                 snap = f"{mirror_name}-{ts}"
-                run(["aptly", "snapshot", "create", snap, "from", "mirror", mirror_name], timeout=cmd_timeout)
+                run(aptly_cmd(aptly_cfg_path, "snapshot", "create", snap, "from", "mirror", mirror_name), timeout=cmd_timeout)
 
-                # Publish (switch if exists)
                 pub_path = f"{prefix}/{dist}"
-                res = run(["aptly", "publish", "show", dist, pub_path], check=False, timeout=cmd_timeout)
+                res = run(aptly_cmd(aptly_cfg_path, "publish", "show", dist, pub_path), check=False, timeout=cmd_timeout)
                 if res.returncode == 0:
-                    run(["aptly", "publish", "switch"] + pub_gpg_flags + [dist, pub_path, snap], timeout=cmd_timeout)
+                    run(
+                        aptly_cmd(aptly_cfg_path, "publish", "switch", *pub_gpg_flags, dist, pub_path, snap),
+                        timeout=cmd_timeout,
+                    )
                 else:
                     run(
-                        ["aptly", "publish", "snapshot"] + pub_gpg_flags + ["-distribution=" + dist, snap, pub_path],
+                        aptly_cmd(
+                            aptly_cfg_path,
+                            "publish",
+                            "snapshot",
+                            *pub_gpg_flags,
+                            "-distribution=" + dist,
+                            snap,
+                            pub_path,
+                        ),
                         timeout=cmd_timeout,
                     )
 
-                # Cleanup old snapshots (best-effort)
-                out = run(["aptly", "snapshot", "list", "-raw"], timeout=cmd_timeout).stdout.splitlines()
+                out = run(aptly_cmd(aptly_cfg_path, "snapshot", "list", "-raw"), timeout=cmd_timeout).stdout.splitlines()
                 matching = sorted([s for s in out if s.startswith(mirror_name + "-")])
                 if len(matching) > keep_n:
-                    to_drop = matching[: len(matching) - keep_n]
-                    for s in to_drop:
-                        run(["aptly", "snapshot", "drop", s], check=False, timeout=cmd_timeout)
+                    for s in matching[: len(matching) - keep_n]:
+                        run(aptly_cmd(aptly_cfg_path, "snapshot", "drop", s), check=False, timeout=cmd_timeout)
 
             except Exception as e:
                 failures.append((distro_name, mirror_name, str(e)))

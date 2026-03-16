@@ -13,7 +13,7 @@ def main():
         return 2
 
     with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
 
     rpm_sets = cfg.get("rpm", [])
     base = pathlib.Path(repo_root) / "rpm"
@@ -22,6 +22,7 @@ def main():
     for distro in rpm_sets:
         if not distro.get("enabled", False):
             continue
+
         name = distro["name"]
         releasever = str(distro.get("releasever", ""))
         arch = distro.get("arch", "x86_64")
@@ -30,28 +31,25 @@ def main():
         outdir = base / name / releasever
         outdir.mkdir(parents=True, exist_ok=True)
 
-        # reposync each repoid
         for r in repos:
             repoid = r["repoid"]
-            target = outdir / repoid
-            target.mkdir(parents=True, exist_ok=True)
 
+            # DNF creates a subdirectory named after repoid under --download-path
             cmd = [
                 "dnf", "-y",
                 "--releasever", releasever,
                 "--forcearch", arch,
                 "reposync",
                 "--repoid", repoid,
-                "--download-path", str(target),
+                "--download-path", str(outdir),
                 "--download-metadata",
                 "--delete",
             ]
             run(cmd)
 
-            # If metadata isn't where clients expect or you later curate packages,
-            # you can regenerate repo metadata:
-            # createrepo_c --update <path>
-            # run(["createrepo_c", "--update", str(target)])
+            repo_path = outdir / repoid
+            if repo_path.exists():
+                run(["createrepo_c", "--update", str(repo_path)], check=False)
 
     return 0
 
