@@ -37,6 +37,16 @@ detect_engine() {
   echo "none"
 }
 
+require_image() {
+  local engine="$1"
+  local image="$2"
+
+  if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
+    echo "Required image not found in $engine image store: $image" >&2
+    return 1
+  fi
+}
+
 py_get() {
   # Usage: py_get 'paths.repo_root'
   python3 - "$1" "$CFG" <<'PY'
