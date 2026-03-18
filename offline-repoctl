@@ -23,7 +23,7 @@ elif command -v dnf >/dev/null 2>&1; then
     python3 \
     python3-pyyaml
 else
-  echo "Unsupported host: need apt-get or dnf" >&2
+  echo "Unsupported host: need apt or dnf" >&2
   exit 1
 fi
 
@@ -32,8 +32,8 @@ need() {
 }
 
 detect_engine() {
-  if command -v podman >/dev/null 2>&1; then echo "podman"; return; fi
   if command -v docker >/dev/null 2>&1; then echo "docker"; return; fi
+  if command -v podman >/dev/null 2>&1; then echo "podman"; return; fi
   echo "none"
 }
 
@@ -154,7 +154,7 @@ EOF
 }
 
 show_config() {
-  sed -n '1,200p' "$CFG"
+  ${EDITOR:-nano} "-v" "$CFG"
 }
 
 edit_config() {
@@ -190,7 +190,7 @@ tui() {
       6 "Exit") || true
 
     case "${choice:-6}" in
-      1) dialog --title "config.yml" --msgbox "$(show_config | head -n 400)" 0 0 ;;
+      1) show_config ;;
       2) edit_config ;;
       3) dialog --infobox "Sync running... (check logs afterward)" 5 60; sync_all; dialog --msgbox "Sync complete." 6 40 ;;
       4) dialog --title "logs/offline-repoctl.log" --msgbox "$(tail -n 200 "$HERE/logs/offline-repoctl.log" 2>/dev/null || echo '(no log yet)')" 0 0 ;;
@@ -219,6 +219,8 @@ Tips:
   - Build images once:
       podman build -t offline-repo/debian-apt:stable -f containers/Dockerfile.debian containers
       podman build -t offline-repo/fedora-rpm:latest -f containers/Dockerfile.fedora containers
+      OR
+      docker build ...
   - Then run:
       $0 tui
 EOF

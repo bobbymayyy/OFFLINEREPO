@@ -56,7 +56,7 @@ apt:
        - mirror_name: debian-security-trixie
          url: https://deb.debian.org/debian-security/
          distribution: trixie-security
-         components: [main]
+         components: [updates/main, updates/non-free-firmware] # There is a hierarchy issue causing security components to need a prefix of 'updates/'
          architectures: [amd64]
  
    - name: ubuntu
