@@ -160,7 +160,7 @@ def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
         "skipLegacyPool": True,
         "FileSystemPublishEndpoints": {
             "portable": {
-                "rootDir: str(apt_root),
+                "rootDir": str(apt_root),
                 "linkMethod": "hardlink"
             }
         }
