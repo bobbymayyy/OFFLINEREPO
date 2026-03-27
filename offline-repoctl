@@ -105,20 +105,41 @@ container_run() {
 sync_apt() {
   local img; img="$(py_get containers.debian_image)"
   [[ -n "$img" ]] || { echo "containers.debian_image missing" >&2; exit 1; }
-  container_run "$img" /work/lib/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"
+  mkdir -p "$HERE/logs"
+  log "[INFO] starting APT sync with image: $img"
+  if container_run "$img" /work/lib/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"; then
+    log "[INFO] completed APT sync successfully"
+  else
+    log "[ERROR] APT sync failed"
+    return 1
+  fi
 }
 
 sync_rpm() {
   local img; img="$(py_get containers.fedora_image)"
   [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
-  container_run "$img" /work/lib/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"
+  mkdir -p "$HERE/logs"
+  log "[INFO] starting RPM sync with image: $img"
+  if container_run "$img" /work/lib/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"; then
+    log "[INFO] completed RPM sync successfully"
+  else
+    log "[ERROR] RPM sync failed"
+    return 1
+  fi
 }
 
 sync_apk() {
-  # Can run in either container, use fedora image by default
+  # can run in either image; using fedora by default
   local img; img="$(py_get containers.fedora_image)"
   [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
-  container_run "$img" /work/lib/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"
+  mkdir -p "$HERE/logs"
+  log "[INFO] starting APK sync with image: $img"
+  if container_run "$img" /work/lib/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"; then
+    log "[INFO] completed APK sync successfully"
+  else
+    log "[ERROR] APK sync failed"
+    return 1
+  fi
 }
 
 sync_permanent() {
@@ -171,6 +192,8 @@ edit_config() {
 }
 
 sync_all() {
+  mkdir -p "$HERE/logs"
+  log "[INFO] sync_all started"
   local any
 
   any="$(py_bool_any_enabled apt)"
@@ -183,6 +206,7 @@ sync_all() {
   [[ "$any" == "yes" ]] && sync_apk
 
   sync_permanent
+  log "[INFO] sync_all finished"
 }
 
 tui() {
