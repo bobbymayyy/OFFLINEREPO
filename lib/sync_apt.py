@@ -184,7 +184,6 @@ def main():
         cfg = yaml.safe_load(f) or {}
 
     pathlib.Path(repo_root, "apt").mkdir(parents=True, exist_ok=True)
-    pathlib.Path(repo_root, "state").mkdir(parents=True, exist_ok=True)
 
     g = cfg.get("global", {}) or {}
     keep_n = int(g.get("keep_snapshots", 3))
