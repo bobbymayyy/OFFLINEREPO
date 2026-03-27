@@ -127,7 +127,7 @@ def setup_gpg(repo_root: str, cfg: Dict[str, Any]) -> str:
     if not gpg_key:
         raise RuntimeError("global.aptly_gpg_key must be set to sign published repos")
 
-    gnupg_home = pathlib.Path(repo_root) / "state" / "gnupg"
+    gnupg_home = pathlib.Path(repo_root) / "apt" / "state" / "gnupg"
     gnupg_home.mkdir(parents=True, exist_ok=True)
     os.chmod(gnupg_home, 0o700)
     os.environ["GNUPGHOME"] = str(gnupg_home)
@@ -144,7 +144,8 @@ def setup_gpg(repo_root: str, cfg: Dict[str, Any]) -> str:
     return str(gpg_key)
 
 def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
-    state_root = pathlib.Path(repo_root) / "state" / "aptly"
+    apt_root = pathlib.Path(repo_root) / "apt"
+    state_root = pathlib.Path(repo_root) / "apt" / "state" / "aptly"
     state_root.mkdir(parents=True, exist_ok=True)
 
     g = cfg.get("global", {}) or {}
@@ -157,9 +158,15 @@ def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
         "architectures": architectures,
         "gpgProvider": "gpg",
         "skipLegacyPool": True,
+        "FileSystemPublishEndpoints": {
+            "portable": {
+                "rootDir: str(apt_root),
+                "linkMethod": "hardlink"
+            }
+        }
     }
 
-    cfg_path = pathlib.Path(repo_root) / "state" / "aptly.conf"
+    cfg_path = pathlib.Path(repo_root) / "apt" / "state" / "aptly.conf"
     cfg_path.write_text(json.dumps(aptly_cfg, indent=2) + "\n")
     return cfg_path
 
@@ -237,11 +244,11 @@ def main():
                 snap = f"{mirror_name}-{ts}"
                 run(aptly_cmd(aptly_cfg_path, "snapshot", "create", snap, "from", "mirror", mirror_name), timeout=cmd_timeout)
 
-                pub_path = f"{prefix}/{dist}"
-                res = run(aptly_cmd(aptly_cfg_path, "publish", "show", dist, pub_path), check=False, timeout=cmd_timeout)
+                pub_prefix = f"filesystem:portable:{prefix}/{dist}"
+                res = run(aptly_cmd(aptly_cfg_path, "publish", "show", dist, pub_prefix), check=False, timeout=cmd_timeout)
                 if res.returncode == 0:
                     run(
-                        aptly_cmd(aptly_cfg_path, "publish", "switch", *pub_gpg_flags, dist, pub_path, snap),
+                        aptly_cmd(aptly_cfg_path, "publish", "switch", *pub_gpg_flags, dist, pub_prefix, snap),
                         timeout=cmd_timeout,
                     )
                 else:
@@ -253,7 +260,7 @@ def main():
                             *pub_gpg_flags,
                             "-distribution=" + dist,
                             snap,
-                            pub_path,
+                            pub_prefix,
                         ),
                         timeout=cmd_timeout,
                     )
