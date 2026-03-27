@@ -80,8 +80,7 @@ container_run() {
   local repo_root; repo_root="$(py_get paths.repo_root)"
   [[ -n "$repo_root" ]] || { echo "paths.repo_root is empty in config.yml" >&2; exit 1; }
 
-  mkdir -p "$HERE/logs" "$HERE/state" "$HERE/keys"
-  mkdir -p "$repo_root"/{apt,rpm,apk,logs,state,keys,config} || true
+  mkdir -p "$repo_root"/{apt,rpm,apk,logs,keys}
 
   # Copy config into repo_root/config for portability
   cp -f "$CFG" "$repo_root/config/config.yml"
