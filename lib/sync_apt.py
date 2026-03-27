@@ -204,7 +204,7 @@ def main():
 
         distro_name = must_get(distro, "name", "apt distro")
         mirrors = distro.get("mirrors", []) or []
-        prefix = f"apt/{distro_name}"
+        prefix = f"{distro_name}"
 
         for m in mirrors:
             mirror_name = must_get(m, "mirror_name", f"apt[{distro_name}].mirrors[]")
