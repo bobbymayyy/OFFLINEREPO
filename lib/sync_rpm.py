@@ -8,6 +8,8 @@ def run(cmd, check=True):
 def main():
     cfg_path = os.environ.get("CFG", "/work/config.yml")
     repo_root = os.environ.get("REPO_ROOT")
+    only_name = os.environ.get("ONLY_RPM_NAME", "").strip().lower()
+
     if not repo_root:
         print("REPO_ROOT env missing", file=sys.stderr)
         return 2
@@ -23,7 +25,10 @@ def main():
         if not distro.get("enabled", False):
             continue
 
-        name = distro["name"]
+        name = str(distro["name"]).strip()
+        if only_name and name.lower() != only_name:
+            continue
+
         releasever = str(distro.get("releasever", ""))
         arch = distro.get("arch", "x86_64")
         repos = distro.get("repos", [])
@@ -34,15 +39,17 @@ def main():
         for r in repos:
             repoid = r["repoid"]
 
-            # DNF creates a subdirectory named after repoid under --download-path
             cmd = [
                 "dnf", "-y",
                 "--releasever", releasever,
                 "--forcearch", arch,
+                "--setopt=metadata_expire=0",
+                "--setopt=keepcache=1",
                 "reposync",
                 "--repoid", repoid,
                 "--download-path", str(outdir),
                 "--download-metadata",
+                "--downloadcomps",
                 "--delete",
             ]
             run(cmd)
