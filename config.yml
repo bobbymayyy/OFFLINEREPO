@@ -36,6 +36,7 @@ containers:
   # You will build these images once with the Dockerfiles below
   debian_image: offline-repo/debian-apt:stable
   fedora_image: offline-repo/fedora-rpm:latest
+  rocky_image: offline-repo/rocky-rpm:latest
 
 apt:
    - name: debian
