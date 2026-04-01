@@ -1,6 +1,6 @@
 paths:
   # Where the mirrored/published repo tree lives (portable drive mount or local path)
-  repo_root: /media/offlinerepo/OFFLINEREPO
+  repo_root: /run/media/<user>/OFFLINEREPO
 
   # Optional: if set, "sync" will also rsync repo_root -> permanent_root
   permanent_root: ""
@@ -11,7 +11,7 @@ paths:
 global:
   # Default architectures to include (used where supported)
   architectures: [amd64]
- 
+
   # Keep last N APT snapshots per mirror (aptly)
   keep_snapshots: 2
 
@@ -53,33 +53,38 @@ apt:
          components: [main, contrib, non-free, non-free-firmware]
          # Architectures (overrides global if set)
          architectures: [amd64]
+       - mirror_name: debian-updates-trixie
+         url: https://deb.debian.org/debian/
+         distribution: trixie-updates
+         components: [main, contrib, non-free, non-free-firmware]
+         architectures: [amd64]
        - mirror_name: debian-security-trixie
          url: https://deb.debian.org/debian-security/
          distribution: trixie-security
-         components: [updates/main, updates/non-free-firmware] # There is a hierarchy issue causing security components to need a prefix of 'updates/'
+         components: [updates/main, updates/non-free-firmware]
          architectures: [amd64]
- 
+
    - name: ubuntu
      enabled: false
      apt_keyrings:
        - /usr/share/keyrings/ubuntu-archive-keyring.gpg
      mirrors:
-       - mirror_name: ubuntu-jammy
+       - mirror_name: ubuntu-noble
          url: https://archive.ubuntu.com/ubuntu/
-         distribution: jammy
+         distribution: noble
          components: [main, restricted, universe, multiverse]
          architectures: [amd64]
-       - mirror_name: ubuntu-jammy-updates
+       - mirror_name: ubuntu-noble-updates
          url: https://archive.ubuntu.com/ubuntu/
-         distribution: jammy-updates
+         distribution: noble-updates
          components: [main, restricted, universe, multiverse]
          architectures: [amd64]
-       - mirror_name: ubuntu-jammy-security
+       - mirror_name: ubuntu-noble-security
          url: https://security.ubuntu.com/ubuntu/
-         distribution: jammy-security
+         distribution: noble-security
          components: [main, restricted, universe, multiverse]
          architectures: [amd64]
- 
+
    - name: kali
      enabled: false
      apt_keyrings:
@@ -90,7 +95,7 @@ apt:
          distribution: kali-rolling
          components: [main, contrib, non-free, non-free-firmware]
          architectures: [amd64]
- 
+
    - name: proxmox
      enabled: false
      apt_keyrings:
@@ -98,11 +103,16 @@ apt:
      mirrors:
        # Example for Proxmox on Debian bookworm (no-subscription)
        - mirror_name: proxmox-trixie
-         url: https://download.proxmox.com/debian/pve/
+         url: http://download.proxmox.com/debian/pve/
          distribution: trixie
          components: [pve-no-subscription]
          architectures: [amd64]
- 
+       - mirror_name: proxmox-ceph-squid
+         url: http://download.proxmox.com/debian/ceph-squid/
+         distribution: trixie
+         components: [no-subscription]
+         architectures: [amd64]
+
    # NVIDIA CUDA APT repo (add if you want it mirrored via aptly)
    - name: cuda
      enabled: false
