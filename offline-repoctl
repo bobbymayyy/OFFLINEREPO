@@ -282,8 +282,9 @@ Usage:
 
 Tips:
   - Build images once:
-      podman build -t offline-repo/debian-apt:stable -f containers/Dockerfile.debian containers
-      podman build -t offline-repo/fedora-rpm:latest -f containers/Dockerfile.fedora containers
+      podman build -t offline-repo/debian-apt:trixie -f containers/Dockerfile.debian containers
+      podman build -t offline-repo/fedora-rpm:43 -f containers/Dockerfile.fedora containers
+      podman build -t offline-repo/rocky-rpm:9 -f containers/Dockerfile.rocky containers
       OR
       docker build ...
   - Then run:
