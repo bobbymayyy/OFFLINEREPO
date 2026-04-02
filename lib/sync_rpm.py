@@ -49,7 +49,6 @@ def main():
                 "--repoid", repoid,
                 "--download-path", str(outdir),
                 "--download-metadata",
-                "--downloadcomps",
                 "--delete",
             ]
             run(cmd)
