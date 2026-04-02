@@ -204,7 +204,6 @@ def main():
 
         distro_name = must_get(distro, "name", "apt distro")
         mirrors = distro.get("mirrors", []) or []
-        prefix = f"{distro_name}"
 
         for m in mirrors:
             mirror_name = must_get(m, "mirror_name", f"apt[{distro_name}].mirrors[]")
@@ -243,7 +242,7 @@ def main():
                 snap = f"{mirror_name}-{ts}"
                 run(aptly_cmd(aptly_cfg_path, "snapshot", "create", snap, "from", "mirror", mirror_name), timeout=cmd_timeout)
 
-                pub_prefix = f"filesystem:portable:{prefix}/{dist}"
+                pub_prefix = f"filesystem:portable:{distro_name}/{mirror_name}"
                 res = run(aptly_cmd(aptly_cfg_path, "publish", "show", dist, pub_prefix), check=False, timeout=cmd_timeout)
                 if res.returncode == 0:
                     run(
