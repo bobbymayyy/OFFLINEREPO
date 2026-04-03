@@ -47,6 +47,8 @@ def main():
                 "--setopt=keepcache=1",
                 "reposync",
                 "--repoid", repoid,
+                "--arch", arch,
+                "--arch", "noarch",
                 "--download-path", str(outdir),
                 "--download-metadata",
                 "--delete",
