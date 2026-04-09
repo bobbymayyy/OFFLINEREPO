@@ -55,10 +55,6 @@ def main():
             ]
             run(cmd)
 
-            repo_path = outdir / repoid
-            if repo_path.exists():
-                run(["createrepo_c", "--update", str(repo_path)], check=False)
-
     return 0
 
 if __name__ == "__main__":
