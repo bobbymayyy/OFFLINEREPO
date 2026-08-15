@@ -54,7 +54,7 @@ require_image() {
 }
 
 py_get() {
-  python3 - "$1" "$CFG" <<'PY'
+  python3 - "$1" "$CFG" <<'PYCFG'
 import sys, yaml
 path = sys.argv[1].split('.')
 cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
@@ -64,11 +64,11 @@ for part in path:
     if cur is None:
         break
 print('' if cur is None else cur)
-PY
+PYCFG
 }
 
 py_get_path() {
-  python3 - "$1" "$CFG" <<'PY'
+  python3 - "$1" "$CFG" <<'PYCFG'
 import os, sys, yaml
 path = sys.argv[1].split('.')
 cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
@@ -81,21 +81,21 @@ if cur is None or not str(cur).strip():
     print('')
 else:
     print(os.path.abspath(os.path.expanduser(str(cur))))
-PY
+PYCFG
 }
 
 py_bool_any_enabled() {
-  python3 - "$1" "$CFG" <<'PY'
+  python3 - "$1" "$CFG" <<'PYCFG'
 import sys, yaml
 key = sys.argv[1]
 cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
 items = cfg.get(key, []) or []
 print('yes' if any(item.get('enabled', False) for item in items) else 'no')
-PY
+PYCFG
 }
 
 py_enabled_rpm_specs() {
-  python3 - "$CFG" <<'PY'
+  python3 - "$CFG" <<'PYCFG'
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
 for item in cfg.get('rpm', []) or []:
@@ -105,11 +105,11 @@ for item in cfg.get('rpm', []) or []:
     runner = str(item.get('runner', name)).strip().lower()
     if name:
         print(f'{name}\t{runner}')
-PY
+PYCFG
 }
 
 py_rpm_repoids() {
-  python3 - "$1" "$CFG" <<'PY'
+  python3 - "$1" "$CFG" <<'PYCFG'
 import sys, yaml
 name = sys.argv[1]
 cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
@@ -119,7 +119,7 @@ for item in cfg.get('rpm', []) or []:
     for repo in item.get('repos', []) or []:
         if repo.get('enabled', True):
             print(repo['repoid'])
-PY
+PYCFG
 }
 
 validate_repo_root() {
@@ -262,6 +262,15 @@ prepare_rhel() {
   done < <(py_rpm_repoids rhel)
 }
 
+check_rhel_entitlement() {
+  need dnf
+  need subscription-manager
+  if ! subscription-manager identity >/dev/null 2>&1; then
+    echo "RHEL preflight requires this host to be registered and entitled." >&2
+    return 1
+  fi
+}
+
 sync_rpm() {
   local distro runner
   while IFS=$'\t' read -r distro runner; do
@@ -319,6 +328,75 @@ sync_apk() {
   fi
 }
 
+preflight_apt() {
+  local image
+  image="$(py_get containers.debian_image)"
+  [[ -n "$image" ]] || { echo "containers.debian_image missing" >&2; return 1; }
+  log "[INFO] starting APT package reachability preflight"
+  if container_run "$image" env PREFLIGHT_FAMILY=apt python3 /work/lib/preflight.py |& tee -a "$HERE/logs/preflight.log"; then
+    log "[INFO] APT preflight completed successfully"
+  else
+    log "[ERROR] APT preflight failed"
+    return 1
+  fi
+}
+
+preflight_rpm() {
+  local distro runner rc=0
+  while IFS=$'\t' read -r distro runner; do
+    [[ -n "$distro" ]] || continue
+
+    if [[ "$runner" == host ]]; then
+      if [[ "$distro" == rhel ]]; then
+        check_rhel_entitlement || { rc=1; continue; }
+      fi
+      log "[INFO] starting RPM package reachability preflight for $distro on host"
+      if CFG="$CFG" ONLY_RPM_NAME="$distro" PREFLIGHT_FAMILY=rpm \
+        python3 "$HERE/lib/preflight.py" |& tee -a "$HERE/logs/preflight.log"; then
+        log "[INFO] RPM preflight completed successfully for $distro"
+      else
+        log "[ERROR] RPM preflight failed for $distro"
+        rc=1
+      fi
+      continue
+    fi
+
+    local image=""
+    case "$runner" in
+      fedora) image="$(py_get containers.fedora_image)" ;;
+      rocky) image="$(py_get containers.rocky_image)" ;;
+      *)
+        echo "Unknown RPM runner '$runner' for '$distro'. Use fedora, rocky, or host." >&2
+        rc=1
+        continue
+        ;;
+    esac
+
+    log "[INFO] starting RPM package reachability preflight for $distro"
+    if container_run "$image" env ONLY_RPM_NAME="$distro" PREFLIGHT_FAMILY=rpm \
+      python3 /work/lib/preflight.py |& tee -a "$HERE/logs/preflight.log"; then
+      log "[INFO] RPM preflight completed successfully for $distro"
+    else
+      log "[ERROR] RPM preflight failed for $distro"
+      rc=1
+    fi
+  done < <(py_enabled_rpm_specs)
+  return "$rc"
+}
+
+preflight_apk() {
+  local image
+  image="$(py_get containers.fedora_image)"
+  [[ -n "$image" ]] || { echo "containers.fedora_image missing" >&2; return 1; }
+  log "[INFO] starting Alpine package reachability preflight"
+  if container_run "$image" env PREFLIGHT_FAMILY=apk python3 /work/lib/preflight.py |& tee -a "$HERE/logs/preflight.log"; then
+    log "[INFO] Alpine preflight completed successfully"
+  else
+    log "[ERROR] Alpine preflight failed"
+    return 1
+  fi
+}
+
 sync_permanent() {
   local repo_root permanent
   repo_root="$(py_get_path paths.repo_root)"
@@ -332,7 +410,7 @@ sync_permanent() {
 }
 
 export_snippets() {
-  python3 - "$CFG" <<'PY'
+  python3 - "$CFG" <<'PYCFG'
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
 base = str((cfg.get('paths', {}) or {}).get('publish_url_base', '')).rstrip('/')
@@ -379,12 +457,12 @@ for distro in cfg.get('apk', []) or []:
             print(f'{base}/apk/{name}/{mirror["mirror_name"]}')
 
 print('\n# Note: CUDA RPM clients also need NVIDIA\'s public RPM signing key installed locally.')
-PY
+PYCFG
 }
 
 validate_config() {
-  python3 - "$CFG" <<'PY'
-import os, sys, yaml
+  python3 - "$CFG" <<'PYCFG'
+import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
 errors = []
 root = str((cfg.get('paths', {}) or {}).get('repo_root', ''))
@@ -409,12 +487,53 @@ if any(d.get('enabled', False) for d in cfg.get('apt', []) or []):
     if link_method not in ('hardlink', 'copy'):
         errors.append('global.aptly_publish_link_method must be hardlink or copy')
 
+global_cfg = cfg.get('global', {}) or {}
+for key in ('preflight_concurrency', 'preflight_timeout_sec', 'preflight_metadata_timeout_sec'):
+    value = global_cfg.get(key)
+    if value is None:
+        continue
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        errors.append(f'global.{key} must be a positive integer')
+        continue
+    if parsed < 1:
+        errors.append(f'global.{key} must be a positive integer')
+
 if errors:
     for error in errors:
         print(f'ERROR: {error}', file=sys.stderr)
     raise SystemExit(1)
 print('Configuration syntax and basic invariants look good.')
-PY
+PYCFG
+}
+
+preflight_all() {
+  mkdir -p "$HERE/logs"
+  : > "$HERE/logs/preflight.log"
+  validate_config
+  log "[INFO] preflight started"
+
+  local rc=0
+  if [[ "$(py_bool_any_enabled apt)" == yes ]]; then
+    preflight_apt || rc=1
+  fi
+  if [[ "$(py_bool_any_enabled rpm)" == yes ]]; then
+    preflight_rpm || rc=1
+  fi
+  if [[ "$(py_bool_any_enabled apk)" == yes ]]; then
+    preflight_apk || rc=1
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    log "[INFO] preflight finished successfully"
+    echo "Preflight complete: every enumerated package payload was reachable."
+  else
+    log "[ERROR] preflight finished with failures"
+    echo "Preflight failed: one or more repositories or package payloads were unreachable." >&2
+    echo "See: $HERE/logs/preflight.log" >&2
+  fi
+  return "$rc"
 }
 
 show_config() {
@@ -451,12 +570,14 @@ tui() {
       1 "View current configuration" \
       2 "Edit configuration" \
       3 "Validate configuration" \
-      4 "Sync enabled repositories" \
-      5 "View logs" \
-      6 "Export client setup snippets" \
-      7 "Exit") || true
+      4 "Preflight enabled repositories (dry run)" \
+      5 "Sync enabled repositories" \
+      6 "View controller log" \
+      7 "View preflight log" \
+      8 "Export client setup snippets" \
+      9 "Exit") || true
 
-    case "${choice:-7}" in
+    case "${choice:-9}" in
       1) dialog --title "config.yml" --textbox "$CFG" 0 0 ;;
       2) edit_config ;;
       3)
@@ -467,6 +588,14 @@ tui() {
         fi
         ;;
       4)
+        dialog --infobox "Preflight running; package reachability is being tested..." 6 72
+        if preflight_all; then
+          dialog --msgbox "Preflight succeeded. Every enumerated package payload was reachable." 8 72
+        else
+          dialog --msgbox "Preflight failed. See logs/preflight.log for package-level failures." 8 72
+        fi
+        ;;
+      5)
         dialog --infobox "Sync running..." 5 60
         if sync_all; then
           dialog --msgbox "Sync complete." 6 40
@@ -474,9 +603,10 @@ tui() {
           dialog --msgbox "Sync failed. Check logs." 7 60
         fi
         ;;
-      5) dialog --title "logs/offline-repoctl.log" --textbox "$HERE/logs/offline-repoctl.log" 0 0 ;;
-      6) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
-      7) clear; exit 0 ;;
+      6) dialog --title "logs/offline-repoctl.log" --textbox "$HERE/logs/offline-repoctl.log" 0 0 ;;
+      7) dialog --title "logs/preflight.log" --textbox "$HERE/logs/preflight.log" 0 0 ;;
+      8) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
+      9) clear; exit 0 ;;
     esac
   done
 }
@@ -485,6 +615,7 @@ case "${1:-}" in
   bootstrap) bootstrap ;;
   build-images) build_images ;;
   validate) validate_config ;;
+  preflight) preflight_all ;;
   tui) tui ;;
   sync) sync_all ;;
   show-config) show_config ;;
@@ -495,7 +626,8 @@ case "${1:-}" in
 Usage:
   $0 bootstrap          # install host prerequisites once
   $0 build-images       # build the configured APT/RPM helper images
-  $0 validate           # validate config.yml without syncing
+  $0 validate           # validate config.yml without network/package probing
+  $0 preflight          # enumerate and probe every package in enabled repositories
   $0 sync               # sync all enabled repositories
   $0 tui
   $0 show-config
@@ -508,7 +640,8 @@ Typical first run:
   3. create the APT publishing key as documented in README.md
   4. $0 build-images
   5. $0 validate
-  6. $0 sync
+  6. $0 preflight
+  7. $0 sync
 EOF
     ;;
 esac
