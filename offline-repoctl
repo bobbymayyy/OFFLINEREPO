@@ -406,8 +406,8 @@ if any(d.get('enabled', False) for d in cfg.get('apt', []) or []):
     if not fp or fp.startswith('YOUR_'):
         errors.append('APT is enabled but global.aptly_gpg_key is not configured')
     link_method = str((cfg.get('global', {}) or {}).get('aptly_publish_link_method', 'hardlink'))
-    if link_method not in ('hardlink', 'copy', 'symlink'):
-        errors.append('global.aptly_publish_link_method must be hardlink, copy, or symlink')
+    if link_method not in ('hardlink', 'copy'):
+        errors.append('global.aptly_publish_link_method must be hardlink or copy')
 
 if errors:
     for error in errors:
