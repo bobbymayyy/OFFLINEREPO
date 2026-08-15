@@ -4,120 +4,238 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="${CFG:-$HERE/config.yml}"
 
-log() { printf "%s\n" "$*" | tee -a "$HERE/logs/offline-repoctl.log" >/dev/null; }
-
-if command -v apt >/dev/null 2>&1; then
-  sudo apt update
-  sudo apt install -y \
-    podman \
-    rsync \
-    dialog \
-    python3 \
-    python3-yaml
-elif command -v dnf >/dev/null 2>&1; then
-  sudo dnf update
-  sudo dnf install -y \
-    podman \
-    rsync \
-    dialog \
-    python3 \
-    python3-pyyaml
-else
-  echo "Unsupported host: need apt or dnf" >&2
-  exit 1
-fi
+log() {
+  mkdir -p "$HERE/logs"
+  printf '%s\n' "$*" | tee -a "$HERE/logs/offline-repoctl.log" >/dev/null
+}
 
 need() {
-  command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1" >&2; exit 1; }
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Missing dependency: $1" >&2
+    exit 1
+  }
+}
+
+as_root() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    "$@"
+  else
+    need sudo
+    sudo "$@"
+  fi
 }
 
 detect_engine() {
-  if command -v docker >/dev/null 2>&1; then echo "docker"; return; fi
-  if command -v podman >/dev/null 2>&1; then echo "podman"; return; fi
-  echo "none"
+  if command -v docker >/dev/null 2>&1; then echo docker; return; fi
+  if command -v podman >/dev/null 2>&1; then echo podman; return; fi
+  echo none
+}
+
+bootstrap() {
+  if command -v apt-get >/dev/null 2>&1; then
+    as_root apt-get update
+    as_root apt-get install -y podman rsync dialog python3 python3-yaml gnupg
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf -y install podman rsync dialog python3 python3-pyyaml gnupg2 dnf-plugins-core
+  else
+    echo "Unsupported host: need apt-get or dnf for bootstrap." >&2
+    return 1
+  fi
+  echo "Bootstrap complete. Existing Docker installations are also supported."
 }
 
 require_image() {
-  local engine="$1"
-  local image="$2"
-
+  local engine="$1" image="$2"
   if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
     echo "Required image not found in $engine image store: $image" >&2
+    echo "Run: $0 build-images" >&2
     return 1
   fi
 }
 
 py_get() {
-  # Usage: py_get 'paths.repo_root'
   python3 - "$1" "$CFG" <<'PY'
 import sys, yaml
-path = sys.argv[1].split(".")
-cfg = yaml.safe_load(open(sys.argv[2],"r"))
+path = sys.argv[1].split('.')
+cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
 cur = cfg
-for p in path:
-  if cur is None: break
-  cur = cur.get(p) if isinstance(cur, dict) else None
-print("" if cur is None else cur)
+for part in path:
+    cur = cur.get(part) if isinstance(cur, dict) else None
+    if cur is None:
+        break
+print('' if cur is None else cur)
+PY
+}
+
+py_get_path() {
+  python3 - "$1" "$CFG" <<'PY'
+import os, sys, yaml
+path = sys.argv[1].split('.')
+cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
+cur = cfg
+for part in path:
+    cur = cur.get(part) if isinstance(cur, dict) else None
+    if cur is None:
+        break
+if cur is None or not str(cur).strip():
+    print('')
+else:
+    print(os.path.abspath(os.path.expanduser(str(cur))))
 PY
 }
 
 py_bool_any_enabled() {
-  # Usage: py_bool_any_enabled 'apt' or 'rpm' or 'apk'
   python3 - "$1" "$CFG" <<'PY'
 import sys, yaml
-k = sys.argv[1]
-cfg = yaml.safe_load(open(sys.argv[2],"r"))
-items = cfg.get(k, [])
-print("yes" if any(d.get("enabled", False) for d in items) else "no")
+key = sys.argv[1]
+cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
+items = cfg.get(key, []) or []
+print('yes' if any(item.get('enabled', False) for item in items) else 'no')
 PY
 }
 
-py_enabled_rpm_names() {
-  # Usage: redirect to function
+py_enabled_rpm_specs() {
   python3 - "$CFG" <<'PY'
 import sys, yaml
-cfg = yaml.safe_load(open(sys.argv[1], "r")) or {}
-for d in cfg.get("rpm", []):
-    if d.get("enabled", False):
-        name = str(d.get("name", "")).strip()
-        if name:
-            print(name)
+cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
+for item in cfg.get('rpm', []) or []:
+    if not item.get('enabled', False):
+        continue
+    name = str(item.get('name', '')).strip()
+    runner = str(item.get('runner', name)).strip().lower()
+    if name:
+        print(f'{name}\t{runner}')
 PY
+}
+
+py_rpm_repoids() {
+  python3 - "$1" "$CFG" <<'PY'
+import sys, yaml
+name = sys.argv[1]
+cfg = yaml.safe_load(open(sys.argv[2], 'r', encoding='utf-8')) or {}
+for item in cfg.get('rpm', []) or []:
+    if str(item.get('name', '')).lower() != name.lower():
+        continue
+    for repo in item.get('repos', []) or []:
+        if repo.get('enabled', True):
+            print(repo['repoid'])
+PY
+}
+
+validate_repo_root() {
+  local repo_root="$1"
+  [[ -n "$repo_root" ]] || { echo "paths.repo_root is empty in config.yml" >&2; return 1; }
+  if [[ "$repo_root" == *"<user>"* ]]; then
+    echo "Edit paths.repo_root in config.yml; it still contains the <user> placeholder." >&2
+    return 1
+  fi
+}
+
+build_images() {
+  local engine
+  engine="$(detect_engine)"
+  [[ "$engine" != none ]] || {
+    echo "Need Docker or Podman. Run: $0 bootstrap" >&2
+    return 1
+  }
+
+  local debian_image fedora_image rocky_image
+  debian_image="$(py_get containers.debian_image)"
+  fedora_image="$(py_get containers.fedora_image)"
+  rocky_image="$(py_get containers.rocky_image)"
+
+  "$engine" build -t "$debian_image" -f "$HERE/containers/Dockerfile.debian" "$HERE/containers"
+  "$engine" build -t "$fedora_image" -f "$HERE/containers/Dockerfile.fedora" "$HERE/containers"
+  "$engine" build -t "$rocky_image" -f "$HERE/containers/Dockerfile.rocky" "$HERE/containers"
 }
 
 container_run() {
   local image="$1"; shift
-  local engine; engine="$(detect_engine)"
-  [[ "$engine" != "none" ]] || { echo "Need podman or docker installed." >&2; exit 1; }
+  local engine
+  engine="$(detect_engine)"
+  [[ "$engine" != none ]] || { echo "Need Docker or Podman installed." >&2; return 1; }
+  require_image "$engine" "$image"
 
-  local repo_root; repo_root="$(py_get paths.repo_root)"
-  [[ -n "$repo_root" ]] || { echo "paths.repo_root is empty in config.yml" >&2; exit 1; }
-
+  local repo_root
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
   mkdir -p "$repo_root"/{apt,rpm,apk,logs,keys}
 
   local repo_mount="$repo_root:/repo"
-  if [[ "$engine" == "podman" ]] && command -v getenforce >/dev/null 2>&1; then
-    if [[ "$(getenforce 2>/dev/null || true)" != "Disabled" ]]; then
+  local ro_suffix=":ro"
+  if [[ "$engine" == podman ]] && command -v getenforce >/dev/null 2>&1; then
+    if [[ "$(getenforce 2>/dev/null || true)" != Disabled ]]; then
       repo_mount="$repo_root:/repo:Z"
+      ro_suffix=":ro,Z"
     fi
   fi
 
-  "$engine" run --rm -t \
+  local -a extra_args=()
+  if [[ "${WITH_APT_SIGNING:-0}" == 1 ]]; then
+    local signing_key passphrase_file
+    signing_key="$(py_get_path global.aptly_private_key_file)"
+    [[ -f "$signing_key" ]] || {
+      echo "APT signing key not found on sync host: $signing_key" >&2
+      echo "See README.md -> Repository signing key." >&2
+      return 1
+    }
+    extra_args+=(
+      -e OFFLINEREPO_SIGNING_KEY_FILE=/run/secrets/offline-repo-signing-private.asc
+      -v "$signing_key:/run/secrets/offline-repo-signing-private.asc$ro_suffix"
+    )
+
+    passphrase_file="$(py_get_path global.aptly_gpg_passphrase_file)"
+    if [[ -n "$passphrase_file" ]]; then
+      [[ -f "$passphrase_file" ]] || {
+        echo "Configured GPG passphrase file not found: $passphrase_file" >&2
+        return 1
+      }
+      extra_args+=(
+        -e OFFLINEREPO_SIGNING_PASSPHRASE_FILE=/run/secrets/offline-repo-signing-passphrase
+        -v "$passphrase_file:/run/secrets/offline-repo-signing-passphrase$ro_suffix"
+      )
+    fi
+  fi
+
+  "$engine" run --rm \
     -e CFG=/work/config.yml \
     -e REPO_ROOT=/repo \
-    -v "$CFG":/work/config.yml:ro \
-    -v "$HERE/lib":/work/lib:ro \
+    -v "$CFG:/work/config.yml:ro" \
+    -v "$HERE/lib:/work/lib:ro" \
     -v "$repo_mount" \
+    "${extra_args[@]}" \
     -w /work \
     "$image" "$@"
 }
 
+check_apt_publish_fs() {
+  local method repo_root test_a test_b
+  method="$(py_get global.aptly_publish_link_method)"
+  [[ -n "$method" ]] || method=hardlink
+  [[ "$method" == hardlink ]] || return 0
+
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
+  mkdir -p "$repo_root/apt/state"
+  test_a="$repo_root/apt/state/.offlinerepo-link-test.$$"
+  test_b="$repo_root/apt/.offlinerepo-link-test.$$"
+  : > "$test_a"
+  if ! ln "$test_a" "$test_b" 2>/dev/null; then
+    rm -f "$test_a" "$test_b"
+    echo "The repository filesystem does not support hardlinks." >&2
+    echo "Set global.aptly_publish_link_method: copy (uses more space) or use a hardlink-capable filesystem." >&2
+    return 1
+  fi
+  rm -f "$test_a" "$test_b"
+}
+
 sync_apt() {
-  local img; img="$(py_get containers.debian_image)"
-  [[ -n "$img" ]] || { echo "containers.debian_image missing" >&2; exit 1; }
-  mkdir -p "$HERE/logs"
-  log "[INFO] starting APT sync with image: $img"
-  if container_run "$img" /work/lib/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"; then
+  local image
+  check_apt_publish_fs
+  image="$(py_get containers.debian_image)"
+  [[ -n "$image" ]] || { echo "containers.debian_image missing" >&2; return 1; }
+  log "[INFO] starting APT sync with image: $image"
+  if WITH_APT_SIGNING=1 container_run "$image" /work/lib/sync_apt.py |& tee -a "$HERE/logs/sync_apt.log"; then
     log "[INFO] completed APT sync successfully"
   else
     log "[ERROR] APT sync failed"
@@ -125,48 +243,75 @@ sync_apt() {
   fi
 }
 
+prepare_rhel() {
+  need dnf
+  need subscription-manager
+  if ! subscription-manager identity >/dev/null 2>&1; then
+    echo "RHEL mirroring requires this host to be registered and entitled." >&2
+    echo "Register the RHEL host, then rerun OFFLINEREPO. Satellite is not required." >&2
+    return 1
+  fi
+
+  local repoid
+  while IFS= read -r repoid; do
+    [[ -n "$repoid" ]] || continue
+    if ! dnf -q repolist --enabled 2>/dev/null | grep -Fq "$repoid"; then
+      echo "+ enabling RHEL repository: $repoid"
+      as_root subscription-manager repos --enable="$repoid" >/dev/null
+    fi
+  done < <(py_rpm_repoids rhel)
+}
+
 sync_rpm() {
-  local distro
-  while IFS= read -r distro; do
+  local distro runner
+  while IFS=$'\t' read -r distro runner; do
     [[ -n "$distro" ]] || continue
-    local img=""
-    case "$distro" in
-      fedora)
-        img="$(py_get containers.fedora_image)"
-        ;;
-      rocky)
-        img="$(py_get containers.rocky_image)"
-        ;;
-      rhel)
-        log "[WARN] skipping RHEL sync for now: requires special entitlement/subscription mode"
-        continue
-        ;;
+
+    if [[ "$runner" == host ]]; then
+      if [[ "$distro" == rhel ]]; then
+        prepare_rhel
+      fi
+      local repo_root
+      repo_root="$(py_get_path paths.repo_root)"
+      validate_repo_root "$repo_root"
+      mkdir -p "$repo_root/rpm"
+      log "[INFO] starting RPM sync for $distro on host"
+      if CFG="$CFG" REPO_ROOT="$repo_root" ONLY_RPM_NAME="$distro" \
+        python3 "$HERE/lib/sync_rpm.py" |& tee -a "$HERE/logs/sync_rpm.log"; then
+        log "[INFO] completed RPM sync for $distro successfully"
+      else
+        log "[ERROR] RPM sync failed for $distro"
+        return 1
+      fi
+      continue
+    fi
+
+    local image=""
+    case "$runner" in
+      fedora) image="$(py_get containers.fedora_image)" ;;
+      rocky) image="$(py_get containers.rocky_image)" ;;
       *)
-        log "[WARN] no RPM image mapping defined for distro: $distro"
-        continue
+        echo "Unknown RPM runner '$runner' for '$distro'. Use fedora, rocky, or host." >&2
+        return 1
         ;;
     esac
-    [[ -n "$img" ]] || {
-      log "[ERROR] missing image config for RPM distro: $distro"
-      return 1
-    }
-    log "[INFO] starting RPM sync for $distro with image: $img"
-    if container_run "$img" env ONLY_RPM_NAME="$distro" /work/lib/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"; then
+
+    log "[INFO] starting RPM sync for $distro with image: $image"
+    if container_run "$image" env ONLY_RPM_NAME="$distro" /work/lib/sync_rpm.py |& tee -a "$HERE/logs/sync_rpm.log"; then
       log "[INFO] completed RPM sync for $distro successfully"
     else
       log "[ERROR] RPM sync failed for $distro"
       return 1
     fi
-  done < <(py_enabled_rpm_names)
+  done < <(py_enabled_rpm_specs)
 }
 
 sync_apk() {
-  # can run in either image; using fedora by default
-  local img; img="$(py_get containers.fedora_image)"
-  [[ -n "$img" ]] || { echo "containers.fedora_image missing" >&2; exit 1; }
-  mkdir -p "$HERE/logs"
-  log "[INFO] starting APK sync with image: $img"
-  if container_run "$img" /work/lib/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"; then
+  local image
+  image="$(py_get containers.fedora_image)"
+  [[ -n "$image" ]] || { echo "containers.fedora_image missing" >&2; return 1; }
+  log "[INFO] starting APK sync with image: $image"
+  if container_run "$image" /work/lib/sync_apk.sh |& tee -a "$HERE/logs/sync_apk.log"; then
     log "[INFO] completed APK sync successfully"
   else
     log "[ERROR] APK sync failed"
@@ -176,66 +321,122 @@ sync_apk() {
 
 sync_permanent() {
   local repo_root permanent
-  repo_root="$(py_get paths.repo_root)"
-  permanent="$(py_get paths.permanent_root)"
-
+  repo_root="$(py_get_path paths.repo_root)"
+  permanent="$(py_get_path paths.permanent_root)"
   [[ -n "$permanent" ]] || return 0
+  validate_repo_root "$repo_root"
   need rsync
-
   mkdir -p "$permanent"
-  rsync -aH --delete "$repo_root"/ "$permanent"/ |& tee -a "$HERE/logs/sync_permanent.log"
+  rsync -aH --partial --delay-updates --delete-delay "$repo_root"/ "$permanent"/ \
+    |& tee -a "$HERE/logs/sync_permanent.log"
 }
 
 export_snippets() {
-  local base; base="$(py_get paths.publish_url_base)"
-  local repo_root; repo_root="$(py_get paths.repo_root)"
+  python3 - "$CFG" <<'PY'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
+base = str((cfg.get('paths', {}) or {}).get('publish_url_base', '')).rstrip('/')
+print(f'# OFFLINEREPO base URL: {base}')
+print('#')
+print('# APT: install OFFLINEREPO public signing key once on each client:')
+print(f'#   wget -qO /tmp/offline-repo.gpg {base}/keys/offline-repo-signing-public.gpg')
+print('#   sudo install -m 0644 /tmp/offline-repo.gpg /usr/share/keyrings/offline-repo.gpg')
+for distro in cfg.get('apt', []) or []:
+    name = distro.get('name')
+    for mirror in distro.get('mirrors', []) or []:
+        if not mirror.get('enabled', True):
+            continue
+        mn = mirror['mirror_name']
+        source_dist = str(mirror['distribution'])
+        dist = str(mirror.get('publish_distribution', mn if source_dist in ('./', '/') else source_dist))
+        comps = mirror.get('components', []) or [mirror.get('publish_component', 'main')]
+        comps_s = ' '.join(str(x) for x in comps)
+        print(f'deb [signed-by=/usr/share/keyrings/offline-repo.gpg] {base}/apt/{name}/{mn} {dist} {comps_s}')
 
-  cat <<EOF
-# Base URL:
-#   $base
-#
-# Repo root on server filesystem:
-#   $repo_root
-#
-# APT clients (examples):
-#   Add a key to /usr/share/keyrings/offline-repo.gpg (you manage keys per upstream)
-#   Then add lines like:
-#     deb [signed-by=/usr/share/keyrings/offline-repo.gpg] $base/apt/debian bookworm main contrib non-free non-free-firmware
-#
-# RPM clients (example .repo):
-#   [fedora-updates-offline]
-#   name=Fedora Updates (offline)
-#   baseurl=$base/rpm/fedora/41/updates/
-#   enabled=1
-#   gpgcheck=0
-#
-# Alpine clients (/etc/apk/repositories):
-#   $base/apk/alpine/alpine-v3.21-main
-#   $base/apk/alpine/alpine-v3.21-community
-EOF
+print('\n# RPM/DNF/YUM repository examples. Package signature checking stays enabled.')
+for distro in cfg.get('rpm', []) or []:
+    name = distro.get('name')
+    rel = distro.get('releasever', '')
+    for repo in distro.get('repos', []) or []:
+        if not repo.get('enabled', True):
+            continue
+        repoid = repo['repoid']
+        section = f'offline-{name}-{repoid}'.replace('_', '-').replace('.', '-')
+        print(f'\n[{section}]')
+        print(f'name=OFFLINEREPO {name} {repoid}')
+        print(f'baseurl={base}/rpm/{name}/{rel}/{repoid}/')
+        print('enabled=1')
+        print('gpgcheck=1')
+        print('repo_gpgcheck=0')
+        if repo.get('gpgkey_url'):
+            print(f'gpgkey={base}/keys/rpm/{name}-{repoid}.pub')
+
+print('\n# Alpine /etc/apk/repositories entries:')
+for distro in cfg.get('apk', []) or []:
+    name = distro.get('name')
+    for mirror in distro.get('mirrors', []) or []:
+        if mirror.get('enabled', True):
+            print(f'{base}/apk/{name}/{mirror["mirror_name"]}')
+
+print('\n# Note: CUDA RPM clients also need NVIDIA\'s public RPM signing key installed locally.')
+PY
+}
+
+validate_config() {
+  python3 - "$CFG" <<'PY'
+import os, sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
+errors = []
+root = str((cfg.get('paths', {}) or {}).get('repo_root', ''))
+if not root or '<user>' in root:
+    errors.append('paths.repo_root is unset or still contains <user>')
+
+for family in ('apt', 'rpm', 'apk'):
+    names = []
+    for item in cfg.get(family, []) or []:
+        name = str(item.get('name', '')).strip()
+        if not name:
+            errors.append(f'{family}: entry missing name')
+        elif name in names:
+            errors.append(f'{family}: duplicate name {name}')
+        names.append(name)
+
+if any(d.get('enabled', False) for d in cfg.get('apt', []) or []):
+    fp = str((cfg.get('global', {}) or {}).get('aptly_gpg_key', ''))
+    if not fp or fp.startswith('YOUR_'):
+        errors.append('APT is enabled but global.aptly_gpg_key is not configured')
+    link_method = str((cfg.get('global', {}) or {}).get('aptly_publish_link_method', 'hardlink'))
+    if link_method not in ('hardlink', 'copy', 'symlink'):
+        errors.append('global.aptly_publish_link_method must be hardlink, copy, or symlink')
+
+if errors:
+    for error in errors:
+        print(f'ERROR: {error}', file=sys.stderr)
+    raise SystemExit(1)
+print('Configuration syntax and basic invariants look good.')
+PY
 }
 
 show_config() {
-  ${EDITOR:-nano} "-v" "$CFG"
+  if [[ -t 1 ]] && command -v less >/dev/null 2>&1; then
+    less "$CFG"
+  else
+    cat "$CFG"
+  fi
 }
 
 edit_config() {
-  ${EDITOR:-nano} "$CFG"
+  "${EDITOR:-nano}" "$CFG"
 }
 
 sync_all() {
   mkdir -p "$HERE/logs"
+  validate_config
   log "[INFO] sync_all started"
-  local any
 
-  any="$(py_bool_any_enabled apt)"
-  [[ "$any" == "yes" ]] && sync_apt
-
-  any="$(py_bool_any_enabled rpm)"
-  [[ "$any" == "yes" ]] && sync_rpm
-
-  any="$(py_bool_any_enabled apk)"
-  [[ "$any" == "yes" ]] && sync_apk
+  [[ "$(py_bool_any_enabled apt)" == yes ]] && sync_apt
+  [[ "$(py_bool_any_enabled rpm)" == yes ]] && sync_rpm
+  [[ "$(py_bool_any_enabled apk)" == yes ]] && sync_apk
 
   sync_permanent
   log "[INFO] sync_all finished"
@@ -246,26 +447,44 @@ tui() {
   while true; do
     local choice
     choice=$(dialog --clear --stdout --title "offline-repoctl" \
-      --menu "Portable multi-distro repo mirror" 0 0 0 \
+      --menu "Portable multi-distro repository mirror" 0 0 0 \
       1 "View current configuration" \
       2 "Edit configuration" \
-      3 "Sync repos now (containers default)" \
-      4 "View logs (tail)" \
-      5 "Export client setup snippets" \
-      6 "Exit") || true
+      3 "Validate configuration" \
+      4 "Sync enabled repositories" \
+      5 "View logs" \
+      6 "Export client setup snippets" \
+      7 "Exit") || true
 
-    case "${choice:-6}" in
-      1) show_config ;;
+    case "${choice:-7}" in
+      1) dialog --title "config.yml" --textbox "$CFG" 0 0 ;;
       2) edit_config ;;
-      3) dialog --infobox "Sync running... (check logs afterward)" 5 60; sync_all; dialog --msgbox "Sync complete." 6 40 ;;
-      4) dialog --title "logs/offline-repoctl.log" --msgbox "$(tail -n 200 "$HERE/logs/offline-repoctl.log" 2>/dev/null || echo '(no log yet)')" 0 0 ;;
-      5) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
-      6) clear; exit 0 ;;
+      3)
+        if output="$(validate_config 2>&1)"; then
+          dialog --msgbox "$output" 8 70
+        else
+          dialog --msgbox "$output" 12 80
+        fi
+        ;;
+      4)
+        dialog --infobox "Sync running..." 5 60
+        if sync_all; then
+          dialog --msgbox "Sync complete." 6 40
+        else
+          dialog --msgbox "Sync failed. Check logs." 7 60
+        fi
+        ;;
+      5) dialog --title "logs/offline-repoctl.log" --textbox "$HERE/logs/offline-repoctl.log" 0 0 ;;
+      6) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
+      7) clear; exit 0 ;;
     esac
   done
 }
 
 case "${1:-}" in
+  bootstrap) bootstrap ;;
+  build-images) build_images ;;
+  validate) validate_config ;;
   tui) tui ;;
   sync) sync_all ;;
   show-config) show_config ;;
@@ -274,21 +493,22 @@ case "${1:-}" in
   *)
     cat <<EOF
 Usage:
+  $0 bootstrap          # install host prerequisites once
+  $0 build-images       # build the configured APT/RPM helper images
+  $0 validate           # validate config.yml without syncing
+  $0 sync               # sync all enabled repositories
   $0 tui
-  $0 sync
   $0 show-config
   $0 edit-config
   $0 export-snippets
 
-Tips:
-  - Build images once:
-      podman build -t offline-repo/debian-apt:trixie -f containers/Dockerfile.debian containers
-      podman build -t offline-repo/fedora-rpm:43 -f containers/Dockerfile.fedora containers
-      podman build -t offline-repo/rocky-rpm:9 -f containers/Dockerfile.rocky containers
-      OR
-      docker build ...
-  - Then run:
-      $0 tui
+Typical first run:
+  1. $0 bootstrap
+  2. edit config.yml (especially paths.repo_root and signing key fingerprint)
+  3. create the APT publishing key as documented in README.md
+  4. $0 build-images
+  5. $0 validate
+  6. $0 sync
 EOF
     ;;
 esac
