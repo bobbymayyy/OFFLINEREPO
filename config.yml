@@ -27,6 +27,13 @@ global:
   aptly_download_speed_limit_kbps: 0
   aptly_publish_link_method: hardlink
 
+  # Network/package preflight tuning. Preflight fetches repository metadata but
+  # does not download package payloads. HTTP package probes use HEAD first and
+  # fall back to a one-byte range request when HEAD is not accepted upstream.
+  preflight_concurrency: 8
+  preflight_timeout_sec: 15
+  preflight_metadata_timeout_sec: 120
+
   fail_fast: false
   cmd_timeout_sec: 0
 
