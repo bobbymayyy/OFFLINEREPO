@@ -74,10 +74,16 @@ Build the helper images once:
 ./offline-repoctl build-images
 ```
 
-Validate configuration before pulling data:
+Validate configuration syntax and local invariants:
 
 ```bash
 ./offline-repoctl validate
+```
+
+Before committing storage and bandwidth to the mirror, run the package reachability dry run:
+
+```bash
+./offline-repoctl preflight
 ```
 
 Then sync:
@@ -86,13 +92,46 @@ Then sync:
 ./offline-repoctl sync
 ```
 
-The TUI is still available:
+The TUI exposes the same validate, preflight, sync, and log operations:
 
 ```bash
 ./offline-repoctl tui
 ```
 
 `bootstrap` is explicit and one-time. Normal commands no longer run operating-system updates or install packages as a side effect.
+
+## Package reachability preflight
+
+`validate` intentionally remains a fast, local configuration check. `preflight` is the network-aware dry run that answers a different question: **can the enabled repositories be resolved correctly, and can every enumerated package payload actually be reached before a large synchronization begins?**
+
+```bash
+./offline-repoctl preflight
+```
+
+The command does not intentionally download package payloads into `repo_root`. It does fetch the repository metadata needed to discover the package set and then reports every package with an `[OK]` or `[FAIL]` line. A complete transcript is written to:
+
+```text
+logs/preflight.log
+```
+
+The preflight behavior follows each repository family:
+
+- **APT / aptly:** OFFLINEREPO asks aptly to create temporary mirror definitions with the configured URL, suite, components, architectures, and upstream keyrings. This catches bad URLs, nonexistent distributions/components, and Release-signature failures using aptly's own parsing/trust path. OFFLINEREPO then fetches the Release/InRelease and package indexes, verifies package-index size/SHA256 values when provided by Release metadata, enumerates every referenced `.deb`, source payload, and configured `.udeb`, and probes each package URL. Temporary aptly state is discarded after the check.
+- **RPM / DNF:** OFFLINEREPO runs `dnf reposync --urls`/`dnf5 reposync --urls` against the configured repository. This resolves the same repo metadata and package set without downloading RPM payloads. Every returned RPM URL is then probed individually. Explicit CUDA GPG-key URLs are probed as well.
+- **Alpine / rsync:** OFFLINEREPO performs an rsync dry run against each configured source/architecture. Every `.apk` returned by the source listing is printed as reachable. A bad rsync URI/module/path fails the family preflight.
+
+HTTP/HTTPS package probes use `HEAD` first. If an upstream rejects `HEAD`, OFFLINEREPO falls back to a one-byte range GET, so the reachability check does not intentionally transfer the complete package. The preflight exits nonzero if any repository setup, metadata fetch, or package probe fails, but continues through the other enabled repositories so the final log contains the full failure set.
+
+For large distributions this can still generate many requests because the point is to test **every package URL that would be mirrored**. Tune the concurrency and timeouts in `config.yml` if necessary:
+
+```yaml
+global:
+  preflight_concurrency: 8
+  preflight_timeout_sec: 15
+  preflight_metadata_timeout_sec: 120
+```
+
+Preflight is a reachability/planning test, not a replacement for synchronization-time cryptographic verification. Actual APT/RPM sync continues to perform the configured upstream signature/package checks.
 
 ## Why APT needs an OFFLINEREPO signing key
 
@@ -204,10 +243,11 @@ Use a normal registered RHEL 9 machine as the online sync host, enable the `rhel
 
 ```bash
 subscription-manager identity
+./offline-repoctl preflight
 ./offline-repoctl sync
 ```
 
-`offline-repoctl` verifies registration, enables the configured BaseOS/AppStream repository IDs with `subscription-manager` when necessary, and runs `dnf reposync` on the host. The resulting repository is still written to the same portable `repo_root` and can be served the same way as Rocky/Fedora mirrors. Satellite is not required.
+`offline-repoctl` verifies registration for both preflight and sync. Sync enables the configured BaseOS/AppStream repository IDs with `subscription-manager` when necessary and runs `dnf reposync` on the host. Preflight does not enable repositories or mutate subscription-manager state. The resulting repository is still written to the same portable `repo_root` and can be served the same way as Rocky/Fedora mirrors. Satellite is not required.
 
 Use RHEL content in accordance with the subscription attached to the sync host.
 
@@ -263,7 +303,8 @@ APT clients must install `keys/offline-repo-signing-public.gpg` and reference it
 ```text
 ./offline-repoctl bootstrap          install host prerequisites once
 ./offline-repoctl build-images       build helper containers using config tags
-./offline-repoctl validate           validate configuration without downloading
+./offline-repoctl validate           validate configuration without network/package probing
+./offline-repoctl preflight          enumerate and probe every package in enabled repositories
 ./offline-repoctl sync               sync every enabled repository
 ./offline-repoctl tui                interactive menu
 ./offline-repoctl export-snippets    print client configuration examples
@@ -272,6 +313,7 @@ APT clients must install `keys/offline-repo-signing-public.gpg` and reference it
 ## Design notes
 
 - Repository families are independent. A failure in one mirror is reported without silently claiming success.
+- Preflight continues across enabled repositories so a single run can expose the complete set of unreachable sources/packages.
 - APT snapshots retain the configured number of generations.
 - RPM and APK synchronization use incremental tools and remove content that disappeared upstream.
 - APT upstream signing keys are narrowly scoped by vendor.
