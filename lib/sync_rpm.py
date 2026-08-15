@@ -84,7 +84,7 @@ def main():
 
             cmd += [
                 "reposync",
-                "--repo" if is_dnf5 else "--repoid", repoid,
+                "--repoid", repoid,
                 "--arch", arch,
                 "--arch", "noarch",
                 "--destdir" if is_dnf5 else "--download-path", str(outdir),
