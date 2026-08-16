@@ -1,169 +1,266 @@
 paths:
-  # Where the mirrored/published repo tree lives (portable drive mount or local path)
+  # Where the mirrored/published repo tree lives (portable drive or local path).
   repo_root: /run/media/<user>/OFFLINEREPO
 
-  # Optional: if set, "sync" will also rsync repo_root -> permanent_root
+  # Optional second copy. Leave empty to disable.
   permanent_root: ""
 
-  # Base URL clients will use (your offline webserver)
-  publish_url_base: http://repo.local/repo/
+  # Base URL used when generating client configuration examples.
+  publish_url_base: http://repo.local/repo
 
 global:
-  # Default architectures to include (used where supported)
   architectures: [amd64]
-
-  # Keep last N APT snapshots per mirror (aptly)
   keep_snapshots: 2
 
-  # Default keyrings for aptly mirror signature verification.
-  # These should exist INSIDE the debian aptly container at runtime.
-  # (You can override per-distro or per-mirror.)
-  apt_keyrings_default:
-    - /usr/share/keyrings/debian-archive-keyring.gpg
-    - /usr/share/keyrings/ubuntu-archive-keyring.gpg
-    - /usr/share/keyrings/proxmox-release.gpg
-    - /usr/share/keyrings/kali-archive-keyring.gpg
-    - /usr/share/keyrings/cuda-archive-keyring.gpg
+  # APT upstream verification keys are intentionally scoped per distro below.
+  # Keep this empty unless you have a keyring that truly applies to every APT source.
+  apt_keyrings_default: []
 
-  # aptly custom repo signing key
+  # OFFLINEREPO's own publishing key. This is NOT an upstream vendor key.
+  # Keep the private key on the online sync host, not on the portable repository drive.
   aptly_gpg_key: "YOUR_FULL_FINGERPRINT"
+  aptly_private_key_file: ~/.config/offline-repo/repo-signing-private.asc
+  aptly_gpg_passphrase_file: ""
 
-  # Error handling control knobs
+  # aptly tuning.
+  aptly_download_concurrency: 4
+  aptly_download_speed_limit_kbps: 0
+  aptly_publish_link_method: hardlink
+
+  # Network/package preflight tuning. Preflight fetches repository metadata but
+  # does not download package payloads. HTTP package probes use HEAD first and
+  # fall back to a one-byte range request when HEAD is not accepted upstream.
+  preflight_concurrency: 8
+  preflight_timeout_sec: 15
+  preflight_metadata_timeout_sec: 120
+
   fail_fast: false
-  cmd_timeout_sec: 0   # 0 = no timeout; set to e.g. 7200 for 2h
+  cmd_timeout_sec: 0
 
 containers:
-  # You will build these images once with the Dockerfiles below
-  debian_image: offline-repo/debian-apt:stable
-  fedora_image: offline-repo/fedora-rpm:latest
-  rocky_image: offline-repo/rocky-rpm:latest
+  debian_image: offline-repo/debian-apt:trixie
+  fedora_image: offline-repo/fedora-rpm:44
+  rocky_image: offline-repo/rocky-rpm:9
 
 apt:
-   - name: debian
-     enabled: false
-     # Optional: tighten default keyrings for this distro (merged after global defaults)
-     apt_keyrings:
-       - /usr/share/keyrings/debian-archive-keyring.gpg
-     mirrors:
-       - mirror_name: debian-trixie
-         # Upstream URL
-         url: https://deb.debian.org/debian/
-         # APT distribution/suite
-         distribution: trixie
-         # Components
-         components: [main, contrib, non-free, non-free-firmware]
-         # Architectures (overrides global if set)
-         architectures: [amd64]
-       - mirror_name: debian-updates-trixie
-         url: https://deb.debian.org/debian/
-         distribution: trixie-updates
-         components: [main, contrib, non-free, non-free-firmware]
-         architectures: [amd64]
-       - mirror_name: debian-security-trixie
-         url: https://deb.debian.org/debian-security/
-         distribution: trixie-security
-         components: [updates/main, updates/non-free-firmware]
-         architectures: [amd64]
+  - name: debian
+    enabled: false
+    apt_keyrings:
+      - /usr/share/keyrings/debian-archive-keyring.gpg
+    mirrors:
+      - mirror_name: debian-trixie
+        enabled: true
+        url: https://deb.debian.org/debian/
+        distribution: trixie
+        components: [main, contrib, non-free, non-free-firmware]
+        architectures: [amd64]
+      - mirror_name: debian-trixie-updates
+        enabled: true
+        url: https://deb.debian.org/debian/
+        distribution: trixie-updates
+        components: [main, contrib, non-free, non-free-firmware]
+        architectures: [amd64]
+      - mirror_name: debian-trixie-security
+        enabled: true
+        url: https://deb.debian.org/debian-security/
+        distribution: trixie-security
+        components: [main, contrib, non-free, non-free-firmware]
+        architectures: [amd64]
 
-   - name: ubuntu
-     enabled: false
-     apt_keyrings:
-       - /usr/share/keyrings/ubuntu-archive-keyring.gpg
-     mirrors:
-       - mirror_name: ubuntu-noble
-         url: https://archive.ubuntu.com/ubuntu/
-         distribution: noble
-         components: [main, restricted, universe, multiverse]
-         architectures: [amd64]
-       - mirror_name: ubuntu-noble-updates
-         url: https://archive.ubuntu.com/ubuntu/
-         distribution: noble-updates
-         components: [main, restricted, universe, multiverse]
-         architectures: [amd64]
-       - mirror_name: ubuntu-noble-security
-         url: https://security.ubuntu.com/ubuntu/
-         distribution: noble-security
-         components: [main, restricted, universe, multiverse]
-         architectures: [amd64]
+  - name: ubuntu
+    enabled: false
+    apt_keyrings:
+      - /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    mirrors:
+      # Ubuntu 24.04 LTS (Noble).
+      - mirror_name: ubuntu-noble
+        enabled: true
+        url: https://archive.ubuntu.com/ubuntu/
+        distribution: noble
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+      - mirror_name: ubuntu-noble-updates
+        enabled: true
+        url: https://archive.ubuntu.com/ubuntu/
+        distribution: noble-updates
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+      - mirror_name: ubuntu-noble-security
+        enabled: true
+        url: https://security.ubuntu.com/ubuntu/
+        distribution: noble-security
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
 
-   - name: kali
-     enabled: false
-     apt_keyrings:
-       - /usr/share/keyrings/kali-archive-keyring.gpg
-     mirrors:
-       - mirror_name: kali-rolling
-         url: https://http.kali.org/kali/
-         distribution: kali-rolling
-         components: [main, contrib, non-free, non-free-firmware]
-         architectures: [amd64]
+      # Ubuntu 26.04 LTS (Resolute). Disabled by default so enabling Ubuntu
+      # does not unexpectedly mirror two full LTS releases.
+      - mirror_name: ubuntu-resolute
+        enabled: false
+        url: https://archive.ubuntu.com/ubuntu/
+        distribution: resolute
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+      - mirror_name: ubuntu-resolute-updates
+        enabled: false
+        url: https://archive.ubuntu.com/ubuntu/
+        distribution: resolute-updates
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
+      - mirror_name: ubuntu-resolute-security
+        enabled: false
+        url: https://security.ubuntu.com/ubuntu/
+        distribution: resolute-security
+        components: [main, restricted, universe, multiverse]
+        architectures: [amd64]
 
-   - name: proxmox
-     enabled: false
-     apt_keyrings:
-       - /usr/share/keyrings/proxmox-release.gpg
-     mirrors:
-       # Example for Proxmox on Debian bookworm (no-subscription)
-       - mirror_name: proxmox-trixie
-         url: http://download.proxmox.com/debian/pve/
-         distribution: trixie
-         components: [pve-no-subscription]
-         architectures: [amd64]
-       - mirror_name: proxmox-ceph-squid
-         url: http://download.proxmox.com/debian/ceph-squid/
-         distribution: trixie
-         components: [no-subscription]
-         architectures: [amd64]
+  - name: kali
+    enabled: false
+    apt_keyrings:
+      - /usr/share/keyrings/kali-archive-keyring.gpg
+    mirrors:
+      - mirror_name: kali-rolling
+        enabled: true
+        url: https://http.kali.org/kali/
+        distribution: kali-rolling
+        components: [main, contrib, non-free, non-free-firmware]
+        architectures: [amd64]
 
-   # NVIDIA CUDA APT repo (add if you want it mirrored via aptly)
-   - name: cuda
-     enabled: false
-     mirrors:
-       - mirror_name: cuda-debian12
-         url: https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/
-         # NVIDIA uses a flat repo; aptly wants a "distribution" argument.
-         # "/" works well for these style repos in aptly mirror create.
-         distribution: /
-         components: []
-         architectures: [amd64]
-         keyrings:
-           - /usr/share/keyrings/cuda-archive-keyring.gpg
-         # Make this mirror only trust the CUDA keyring (instead of global defaults)
-         keyrings_mode: replace
+  - name: proxmox
+    enabled: false
+    apt_keyrings:
+      - /usr/share/keyrings/proxmox-release.gpg
+    mirrors:
+      - mirror_name: proxmox-pve-trixie
+        enabled: true
+        url: https://download.proxmox.com/debian/pve/
+        distribution: trixie
+        components: [pve-no-subscription]
+        architectures: [amd64]
+      - mirror_name: proxmox-ceph-squid-trixie
+        enabled: true
+        url: https://download.proxmox.com/debian/ceph-squid/
+        distribution: trixie
+        components: [no-subscription]
+        architectures: [amd64]
+
+  # NVIDIA's network repositories are distro/platform channels. A channel can
+  # contain packages from multiple CUDA toolkit major versions. Enable only the
+  # platform(s) you actually need to avoid a very large mirror.
+  - name: cuda
+    enabled: false
+    mirrors:
+      - mirror_name: cuda-debian12
+        enabled: false
+        url: https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/
+        distribution: ./
+        publish_distribution: cuda-debian12
+        publish_component: main
+        components: []
+        architectures: [amd64]
+        keyrings: [/usr/share/keyrings/cuda-archive-keyring.gpg]
+        keyrings_mode: replace
+      - mirror_name: cuda-debian13
+        enabled: false
+        url: https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/
+        distribution: ./
+        publish_distribution: cuda-debian13
+        publish_component: main
+        components: []
+        architectures: [amd64]
+        keyrings: [/usr/share/keyrings/cuda-archive-keyring.gpg]
+        keyrings_mode: replace
+      - mirror_name: cuda-ubuntu2404
+        enabled: false
+        url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/
+        distribution: ./
+        publish_distribution: cuda-ubuntu2404
+        publish_component: main
+        components: []
+        architectures: [amd64]
+        keyrings: [/usr/share/keyrings/cuda-archive-keyring.gpg]
+        keyrings_mode: replace
+      - mirror_name: cuda-ubuntu2604
+        enabled: false
+        url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/
+        distribution: ./
+        publish_distribution: cuda-ubuntu2604
+        publish_component: main
+        components: []
+        architectures: [amd64]
+        keyrings: [/usr/share/keyrings/cuda-archive-keyring.gpg]
+        keyrings_mode: replace
 
 rpm:
   - name: fedora
     enabled: false
-    releasever: "43"
+    runner: fedora
+    releasever: "44"
     arch: x86_64
     repos:
-      # Repo IDs must exist in your container's /etc/yum.repos.d
       - repoid: fedora
+        verify_packages: true
       - repoid: updates
+        verify_packages: true
 
   - name: rocky
     enabled: false
+    runner: rocky
     releasever: "9"
     arch: x86_64
     repos:
       - repoid: baseos
+        verify_packages: true
       - repoid: appstream
+        verify_packages: true
       - repoid: extras
+        verify_packages: true
 
+  # Full RHEL content is mirrored from a registered RHEL host. No Satellite is
+  # required. offline-repoctl verifies the host subscription, enables these
+  # repository IDs, and runs reposync locally.
   - name: rhel
     enabled: false
+    runner: host
     releasever: "9"
     arch: x86_64
     repos:
-      - repoid: rhel-9-baseos-rpms
-      - repoid: rhel-9-appstream-rpms
-    notes: "RHEL mirroring requires entitlements/subscription access. Treat as special mode."
+      - repoid: rhel-9-for-x86_64-baseos-rpms
+        verify_packages: true
+      - repoid: rhel-9-for-x86_64-appstream-rpms
+        verify_packages: true
+
+  # NVIDIA CUDA RPM channels. rhel9 is also the NVIDIA platform channel for
+  # Rocky Linux 9. These are disabled unless explicitly requested.
+  - name: cuda-rhel9
+    enabled: false
+    runner: rocky
+    releasever: "9"
+    arch: x86_64
+    repos:
+      - repoid: cuda-rhel9
+        baseurl: https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/
+        gpgkey_url: https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/D42D0685.pub
+        verify_packages: true
+
+  - name: cuda-fedora44
+    enabled: false
+    runner: fedora
+    releasever: "44"
+    arch: x86_64
+    repos:
+      - repoid: cuda-fedora44
+        baseurl: https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/
+        gpgkey_url: https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/73CD9B30.pub
+        verify_packages: true
 
 apk:
   - name: alpine
     enabled: false
+    architectures: [x86_64]
     mirrors:
-      # rsync module names vary by mirror. http mirroring is also possible.
-      - mirror_name: alpine-v3.21-main
-        rsync_url: rsync://rsync.alpinelinux.org/alpine/v3.21/main
-      - mirror_name: alpine-v3.21-community
-        rsync_url: rsync://rsync.alpinelinux.org/alpine/v3.21/community
+      - mirror_name: alpine-v3.24-main
+        enabled: true
+        rsync_url: rsync://rsync.alpinelinux.org/alpine/v3.24/main
+      - mirror_name: alpine-v3.24-community
+        enabled: true
+        rsync_url: rsync://rsync.alpinelinux.org/alpine/v3.24/community

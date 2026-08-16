@@ -2,9 +2,9 @@ FROM debian:trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Base tools + aptly + Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl wget \
+    ca-certificates \
+    curl \
     gnupg gpgv \
     rsync bash \
     coreutils findutils \
@@ -14,33 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ubuntu-keyring \
   && rm -rf /var/lib/apt/lists/*
 
-# --- Kali keyring (official) ---
-# Kali rotated signing keys; recommended keyring download:
-#   wget https://archive.kali.org/archive-keyring.gpg -O /usr/share/keyrings/kali-archive-keyring.gpg
-RUN wget -q https://archive.kali.org/archive-keyring.gpg \
-    -O /usr/share/keyrings/kali-archive-keyring.gpg
+# Kali archive keyring, published by Kali.
+RUN curl -fsSL https://archive.kali.org/archive-keyring.gpg \
+    -o /usr/share/keyrings/kali-archive-keyring.gpg \
+  && test -s /usr/share/keyrings/kali-archive-keyring.gpg
 
-# --- Proxmox release keyring (official wiki pattern) ---
-# Proxmox provides a release keyring per Debian codename (bookworm/trixie, etc.)
+# PVE 9 / Debian 13 (Trixie) release key. Fail closed instead of silently
+# falling back to a key for a different Proxmox/Debian generation.
+RUN curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg \
+    -o /usr/share/keyrings/proxmox-release.gpg \
+  && test -s /usr/share/keyrings/proxmox-release.gpg
+
+# NVIDIA's cuda-keyring package installs the CUDA archive verification key.
 RUN set -eux; \
   . /etc/os-release; \
-  codename="${VERSION_CODENAME}"; \
-  # Try codename-specific keyring first; fall back to bookworm if you build on something Proxmox doesn't publish yet.
-  url="https://enterprise.proxmox.com/debian/proxmox-release-${codename}.gpg"; \
-  if ! wget -q -O /usr/share/keyrings/proxmox-release.gpg "$url"; then \
-    wget -q -O /usr/share/keyrings/proxmox-release.gpg "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg"; \
-  fi
-
-# --- NVIDIA CUDA repo keyring ---
-# NVIDIA recommends installing cuda-keyring, which drops /usr/share/keyrings/cuda-archive-keyring.gpg
-RUN set -eux; \
-  . /etc/os-release; \
-  distro="$(echo "${ID}${VERSION_ID}" | tr -d .)"; \
-  # Example: debian13, debian12. Must match your CUDA repo URL scheme.
+  distro="$(printf '%s%s' "${ID}" "${VERSION_ID}" | tr -d .)"; \
   deb="cuda-keyring_1.1-1_all.deb"; \
   base="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64"; \
-  wget -q -O "/tmp/${deb}" "${base}/${deb}"; \
+  curl -fsSL "${base}/${deb}" -o "/tmp/${deb}"; \
   dpkg -i "/tmp/${deb}"; \
-  rm -f "/tmp/${deb}"
+  rm -f "/tmp/${deb}"; \
+  test -s /usr/share/keyrings/cuda-archive-keyring.gpg
 
 WORKDIR /work

@@ -2,7 +2,6 @@ FROM rockylinux:9
 
 RUN dnf -y install \
     dnf-plugins-core \
-    createrepo_c \
     rsync \
     ca-certificates \
     bash \
