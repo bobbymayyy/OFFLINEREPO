@@ -447,6 +447,8 @@ def main():
                                 "create",
                                 *keyring_args,
                             )
+                            if mirror.get("force_components", False):
+                                create.append("-force-components")
                             if arch_flag:
                                 create.append(f"-architectures={arch_flag}")
                             if mirror.get("with_sources", False):

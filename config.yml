@@ -66,6 +66,10 @@ apt:
         distribution: trixie-security
         components: [main, contrib, non-free, non-free-firmware]
         architectures: [amd64]
+        # Debian security metadata advertises updates/* component names while
+        # package indexes live under main/, contrib/, etc. This passes aptly's
+        # -force-components flag at mirror creation without disabling signature checks.
+        force_components: true
 
   - name: ubuntu
     enabled: false

@@ -263,12 +263,18 @@ prepare_rhel() {
 }
 
 check_rhel_entitlement() {
-  need dnf
-  need subscription-manager
-  if ! subscription-manager identity >/dev/null 2>&1; then
-    echo "RHEL preflight requires this host to be registered and entitled." >&2
+  local warning=""
+  if ! command -v dnf >/dev/null 2>&1 || ! command -v subscription-manager >/dev/null 2>&1; then
+    warning="[WARN] RPM rhel: enabled in config.yml, but this is not a usable registered RHEL host (dnf and subscription-manager are required). Skipping RHEL preflight; use a registered, entitled RHEL host for these repositories."
+  elif ! subscription-manager identity >/dev/null 2>&1; then
+    warning="[WARN] RPM rhel: enabled in config.yml, but this host is not registered/entitled with Red Hat. Skipping RHEL preflight; register the host and rerun. Satellite is not required."
+  fi
+
+  if [[ -n "$warning" ]]; then
+    printf '%s\n' "$warning" | tee -a "$HERE/logs/preflight.log" >&2
     return 1
   fi
+  return 0
 }
 
 sync_rpm() {
@@ -348,7 +354,7 @@ preflight_rpm() {
 
     if [[ "$runner" == host ]]; then
       if [[ "$distro" == rhel ]]; then
-        check_rhel_entitlement || { rc=1; continue; }
+        check_rhel_entitlement || continue
       fi
       log "[INFO] starting RPM package reachability preflight for $distro on host"
       if CFG="$CFG" ONLY_RPM_NAME="$distro" PREFLIGHT_FAMILY=rpm \
@@ -526,8 +532,13 @@ preflight_all() {
   fi
 
   if [[ "$rc" -eq 0 ]]; then
-    log "[INFO] preflight finished successfully"
-    echo "Preflight complete: every enumerated package payload was reachable."
+    if grep -q '^\[WARN\]' "$HERE/logs/preflight.log" 2>/dev/null; then
+      log "[WARN] preflight finished successfully with skipped/warning conditions"
+      echo "Preflight complete with warnings: every enumerated package payload was reachable, but one or more enabled repositories were skipped or partially checked. See: $HERE/logs/preflight.log"
+    else
+      log "[INFO] preflight finished successfully"
+      echo "Preflight complete: every enumerated package payload was reachable."
+    fi
   else
     log "[ERROR] preflight finished with failures"
     echo "Preflight failed: one or more repositories or package payloads were unreachable." >&2

@@ -333,6 +333,8 @@ def apt_tool_check(
                 "create",
                 *sync_apt.keyring_flags(keyrings),
             ]
+            if mirror.get("force_components", False):
+                cmd.append("-force-components")
             if archs:
                 cmd.append("-architectures=" + ",".join(archs))
             if mirror.get("with_sources", False):
