@@ -26,16 +26,17 @@ if [[ ! -d "$TARGET/apt" && ! -d "$TARGET/rpm" && ! -d "$TARGET/apk" ]]; then
   exit 1
 fi
 
-for helper in serve-offlinerepo.py merge-offlinerepo.py; do
-  [[ -f "$HERE/$helper" ]] || {
-    echo "Missing portable helper: $HERE/$helper" >&2
-    exit 1
-  }
-  cp "$HERE/$helper" "$TARGET/$helper"
-  chmod 0755 "$TARGET/$helper" 2>/dev/null || true
-done
+SERVER_SRC="$HERE/serve-offlinerepo.py"
+OFFLOAD_SRC="$HERE/lib/offload-offlinerepo.py"
+[[ -f "$SERVER_SRC" ]] || { echo "Missing portable helper: $SERVER_SRC" >&2; exit 1; }
+[[ -f "$OFFLOAD_SRC" ]] || { echo "Missing portable helper: $OFFLOAD_SRC" >&2; exit 1; }
+
+cp "$SERVER_SRC" "$TARGET/serve-offlinerepo.py"
+cp "$OFFLOAD_SRC" "$TARGET/offload-offlinerepo.py"
+chmod 0755 "$TARGET/serve-offlinerepo.py" "$TARGET/offload-offlinerepo.py" 2>/dev/null || true
 
 printf 'Portable server installed: %s\n' "$TARGET/serve-offlinerepo.py"
-printf 'Portable merge helper installed: %s\n' "$TARGET/merge-offlinerepo.py"
-printf 'Serve on the disconnected host: python3 %q --bind 0.0.0.0 --port 8080\n' "$TARGET/serve-offlinerepo.py"
-printf 'Merge this batch into a cumulative tree: python3 %q /srv/OFFLINEREPO\n' "$TARGET/merge-offlinerepo.py"
+printf 'Portable offload helper installed: %s\n' "$TARGET/offload-offlinerepo.py"
+printf 'Serve directly: python3 %q --bind 0.0.0.0 --port 8080\n' "$TARGET/serve-offlinerepo.py"
+printf 'Copy units off USB: python3 %q /srv/OFFLINEREPO\n' "$TARGET/offload-offlinerepo.py"
+printf 'Move units off USB: python3 %q --move /srv/OFFLINEREPO\n' "$TARGET/offload-offlinerepo.py"
