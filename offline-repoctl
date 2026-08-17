@@ -339,7 +339,12 @@ preflight_apt() {
   image="$(py_get containers.debian_image)"
   [[ -n "$image" ]] || { echo "containers.debian_image missing" >&2; return 1; }
   log "[INFO] starting APT package reachability preflight"
-  if container_run "$image" env PREFLIGHT_FAMILY=apt python3 /work/lib/preflight.py |& tee -a "$HERE/logs/preflight.log"; then
+  if container_run "$image" bash -lc '
+    PREFLIGHT_FAMILY=apt python3 /work/lib/preflight.py
+    rc=$?
+    python3 /work/lib/preflight_capacity.py collect apt || true
+    exit "$rc"
+  ' |& tee -a "$HERE/logs/preflight.log"; then
     log "[INFO] APT preflight completed successfully"
   else
     log "[ERROR] APT preflight failed"
@@ -364,6 +369,8 @@ preflight_rpm() {
         log "[ERROR] RPM preflight failed for $distro"
         rc=1
       fi
+      CFG="$CFG" ONLY_RPM_NAME="$distro" \
+        python3 "$HERE/lib/preflight_capacity.py" collect rpm |& tee -a "$HERE/logs/preflight.log" || true
       continue
     fi
 
@@ -379,8 +386,12 @@ preflight_rpm() {
     esac
 
     log "[INFO] starting RPM package reachability preflight for $distro"
-    if container_run "$image" env ONLY_RPM_NAME="$distro" PREFLIGHT_FAMILY=rpm \
-      python3 /work/lib/preflight.py |& tee -a "$HERE/logs/preflight.log"; then
+    if container_run "$image" env ONLY_RPM_NAME="$distro" bash -lc '
+      PREFLIGHT_FAMILY=rpm python3 /work/lib/preflight.py
+      rc=$?
+      python3 /work/lib/preflight_capacity.py collect rpm || true
+      exit "$rc"
+    ' |& tee -a "$HERE/logs/preflight.log"; then
       log "[INFO] RPM preflight completed successfully for $distro"
     else
       log "[ERROR] RPM preflight failed for $distro"
@@ -395,7 +406,12 @@ preflight_apk() {
   image="$(py_get containers.fedora_image)"
   [[ -n "$image" ]] || { echo "containers.fedora_image missing" >&2; return 1; }
   log "[INFO] starting Alpine package reachability preflight"
-  if container_run "$image" env PREFLIGHT_FAMILY=apk python3 /work/lib/preflight.py |& tee -a "$HERE/logs/preflight.log"; then
+  if container_run "$image" bash -lc '
+    PREFLIGHT_FAMILY=apk python3 /work/lib/preflight.py
+    rc=$?
+    python3 /work/lib/preflight_capacity.py collect apk || true
+    exit "$rc"
+  ' |& tee -a "$HERE/logs/preflight.log"; then
     log "[INFO] Alpine preflight completed successfully"
   else
     log "[ERROR] Alpine preflight failed"
@@ -529,6 +545,18 @@ preflight_all() {
   fi
   if [[ "$(py_bool_any_enabled apk)" == yes ]]; then
     preflight_apk || rc=1
+  fi
+
+  local repo_root summary_output
+  repo_root="$(py_get_path paths.repo_root)"
+  if summary_output="$(python3 "$HERE/lib/preflight_capacity.py" summarize \
+      --config "$CFG" \
+      --log "$HERE/logs/preflight.log" \
+      --repo-root "$repo_root" 2>&1)"; then
+    printf '%s\n' "$summary_output" | tee -a "$HERE/logs/preflight.log"
+  else
+    printf '%s\n' "[WARN] CAPACITY: unable to build the preflight grand summary: $summary_output" \
+      | tee -a "$HERE/logs/preflight.log" >&2
   fi
 
   if [[ "$rc" -eq 0 ]]; then
