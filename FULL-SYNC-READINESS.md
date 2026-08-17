@@ -37,6 +37,16 @@ RPM and Alpine naturally map to the same model because their local repository di
 
 See `PORTABLE-UNITS.md` for the operator workflow.
 
+## Persistent state when transport media is emptied
+
+Incremental network use requires the prior package payload to exist somewhere. If `repo_root` is removable media and a unit is moved off that media, a later sync cannot avoid re-downloading missing payloads based on metadata alone.
+
+`paths.permanent_root` provides an optional persistent connected-side copy. Before synchronization, OFFLINEREPO determines the units enabled in `config.yml` and restores only enabled units that are missing from `repo_root`. The package managers then perform their normal incremental update. After a successful sync, the persistent copy is refreshed with unit-aware semantics.
+
+This allows the USB to be emptied on the disconnected side while keeping the next connected sync bandwidth-efficient. Disabled or unrelated units in `permanent_root` are not automatically restored to the USB.
+
+Without `permanent_root`, preserve incrementality by returning the complete unit to staging before its next update, or accept that physically missing payloads must be downloaded again.
+
 ## Portable filesystem choice
 
 APT's default publish method remains `hardlink`, which avoids duplicating package bytes between a unit's aptly pool and its published `pool/` tree.
