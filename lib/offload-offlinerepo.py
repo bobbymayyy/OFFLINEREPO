@@ -93,19 +93,13 @@ def iter_unit_files(unit: Unit) -> list[tuple[pathlib.PurePath, pathlib.Path]]:
         current = pathlib.Path(dirpath)
         for dirname in list(dirnames):
             if (current / dirname).is_symlink():
-                raise RuntimeError(
-                    f"symlinked directory is not supported in repository unit {unit.unit_id}: {current / dirname}"
-                )
+                raise RuntimeError(f"symlinked directory is not supported in repository unit {unit.unit_id}: {current / dirname}")
         for filename in filenames:
             path = current / filename
             if path.is_symlink():
-                raise RuntimeError(
-                    f"symlinked file is not supported in repository unit {unit.unit_id}: {path}"
-                )
+                raise RuntimeError(f"symlinked file is not supported in repository unit {unit.unit_id}: {path}")
             if path.is_file():
-                files.append(
-                    (pathlib.PurePath(path.relative_to(unit.root).as_posix()), path)
-                )
+                files.append((pathlib.PurePath(path.relative_to(unit.root).as_posix()), path))
     files.sort(key=lambda item: file_priority(unit, item[0]))
     return files
 
@@ -115,29 +109,18 @@ def unchanged(src: pathlib.Path, dst: pathlib.Path) -> bool:
         return False
     try:
         source_stat, destination_stat = src.stat(), dst.stat()
-        return (
-            source_stat.st_size == destination_stat.st_size
-            and source_stat.st_mtime_ns == destination_stat.st_mtime_ns
-        )
+        return source_stat.st_size == destination_stat.st_size and source_stat.st_mtime_ns == destination_stat.st_mtime_ns
     except OSError:
         return False
 
 
-def atomic_copy(
-    src: pathlib.Path,
-    dst: pathlib.Path,
-    *,
-    dry_run: bool,
-    inode_map: Dict[Tuple[int, int], pathlib.Path],
-) -> int:
+def atomic_copy(src: pathlib.Path, dst: pathlib.Path, *, dry_run: bool, inode_map: Dict[Tuple[int, int], pathlib.Path]) -> int:
     stat = src.stat()
     inode_key = (stat.st_dev, stat.st_ino)
     if dry_run:
         return stat.st_size
     dst.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=".offlinerepo-copy-", suffix=".part", dir=str(dst.parent)
-    )
+    fd, temp_name = tempfile.mkstemp(prefix=".offlinerepo-copy-", suffix=".part", dir=str(dst.parent))
     os.close(fd)
     temp = pathlib.Path(temp_name)
     try:
@@ -173,39 +156,32 @@ def source_paths(unit: Unit) -> tuple[set[str], set[str]]:
     return files, dirs
 
 
-def delete_stale(
-    unit: Unit, destination_unit: pathlib.Path, dry_run: bool
-) -> tuple[int, int]:
+def delete_stale(unit: Unit, destination_unit: pathlib.Path, dry_run: bool) -> tuple[int, int]:
     if not destination_unit.is_dir():
         return 0, 0
     src_files, src_dirs = source_paths(unit)
     deleted_files = deleted_dirs = 0
-    for dirpath, dirnames, filenames in os.walk(
-        destination_unit, topdown=False, followlinks=False
-    ):
+    for dirpath, dirnames, filenames in os.walk(destination_unit, topdown=False, followlinks=False):
         current = pathlib.Path(dirpath)
         rel_dir = current.relative_to(destination_unit)
         for filename in filenames:
             rel = (rel_dir / filename).as_posix()
             if rel not in src_files:
                 deleted_files += 1
-                print(
-                    f"{'WOULD DELETE' if dry_run else 'DELETE'} "
-                    f"{unit.relative.as_posix()}/{rel}"
-                )
+                print(f"{'WOULD DELETE' if dry_run else 'DELETE'} {unit.relative.as_posix()}/{rel}")
                 if not dry_run:
                     (current / filename).unlink(missing_ok=True)
         for dirname in dirnames:
             rel = (rel_dir / dirname).as_posix()
             path = current / dirname
-            if rel not in src_dirs and path.is_dir():
+            if rel not in src_dirs:
                 deleted_dirs += 1
-                print(
-                    f"{'WOULD DELETE' if dry_run else 'DELETE'} "
-                    f"{unit.relative.as_posix()}/{rel}/"
-                )
+                print(f"{'WOULD DELETE' if dry_run else 'DELETE'} {unit.relative.as_posix()}/{rel}/")
                 if not dry_run:
-                    shutil.rmtree(path)
+                    if path.is_symlink():
+                        path.unlink(missing_ok=True)
+                    elif path.is_dir():
+                        shutil.rmtree(path)
     return deleted_files, deleted_dirs
 
 
@@ -213,14 +189,10 @@ def verify_unit(unit: Unit, destination_unit: pathlib.Path) -> None:
     for rel, src in iter_unit_files(unit):
         dst = destination_unit.joinpath(*rel.parts)
         if not unchanged(src, dst):
-            raise RuntimeError(
-                f"verification failed after copy: {unit.unit_id} {rel}"
-            )
+            raise RuntimeError(f"verification failed after copy: {unit.unit_id} {rel}")
 
 
-def sync_unit(
-    unit: Unit, destination: pathlib.Path, dry_run: bool
-) -> tuple[int, int, int]:
+def sync_unit(unit: Unit, destination: pathlib.Path, dry_run: bool) -> tuple[int, int, int]:
     destination_unit = destination.joinpath(*unit.relative.parts)
     copied = skipped = copied_bytes = 0
     inode_map: Dict[Tuple[int, int], pathlib.Path] = {}
@@ -233,23 +205,16 @@ def sync_unit(
             if stat.st_nlink > 1:
                 inode_map.setdefault(inode_key, dst)
             continue
-        copied_bytes += atomic_copy(
-            src, dst, dry_run=dry_run, inode_map=inode_map
-        )
+        copied_bytes += atomic_copy(src, dst, dry_run=dry_run, inode_map=inode_map)
         copied += 1
-        print(
-            f"{'WOULD COPY' if dry_run else 'COPY'} "
-            f"{unit.relative.as_posix()}/{rel}"
-        )
+        print(f"{'WOULD COPY' if dry_run else 'COPY'} {unit.relative.as_posix()}/{rel}")
     delete_stale(unit, destination_unit, dry_run)
     if not dry_run:
         verify_unit(unit, destination_unit)
     return copied, skipped, copied_bytes
 
 
-def copy_root_extras(
-    source: pathlib.Path, destination: pathlib.Path, dry_run: bool
-) -> None:
+def copy_root_extras(source: pathlib.Path, destination: pathlib.Path, dry_run: bool) -> None:
     # Public keys are cumulative and tiny; never delete destination-only keys.
     src_keys = source / "keys"
     if src_keys.is_dir():
@@ -309,22 +274,24 @@ def prune_empty_family_dirs(source: pathlib.Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Copy complete OFFLINEREPO repository units to another storage root "
-            "without combining their package-manager state."
-        )
-    )
+    parser = argparse.ArgumentParser(description="Copy complete OFFLINEREPO repository units to another storage root without combining their package-manager state.")
     parser.add_argument("destination", help="destination storage/serving root")
     parser.add_argument(
         "--source",
         default=str(pathlib.Path(__file__).resolve().parent),
         help="source OFFLINEREPO root (default: directory containing this script)",
     )
+    parser.add_argument("--move", action="store_true", help="remove each source unit only after it has copied and verified successfully")
     parser.add_argument(
-        "--move",
+        "--unit",
+        action="append",
+        default=[],
+        help="transfer only this repository unit ID; may be repeated",
+    )
+    parser.add_argument(
+        "--ignore-missing-units",
         action="store_true",
-        help="remove each source unit only after it has copied and verified successfully",
+        help="do not fail if a requested --unit is not present in the source",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -337,10 +304,22 @@ def main() -> int:
         parser.error(f"source does not exist: {source}")
 
     units = discover_units(source)
+    if args.unit:
+        requested = list(dict.fromkeys(args.unit))
+        by_id = {unit.unit_id: unit for unit in units}
+        missing = [unit_id for unit_id in requested if unit_id not in by_id]
+        if missing and not args.ignore_missing_units:
+            parser.error("requested repository unit(s) not found: " + ", ".join(missing))
+        units = [by_id[unit_id] for unit_id in requested if unit_id in by_id]
+        if missing:
+            for unit_id in missing:
+                print(f"SKIP MISSING {unit_id}")
+    elif not units:
+        parser.error(f"no repository units found under {source}; run offline-repoctl sync first")
+
     if not units:
-        parser.error(
-            f"no repository units found under {source}; run offline-repoctl sync first"
-        )
+        print("No matching repository units to transfer.")
+        return 0
 
     total_copied = total_skipped = total_bytes = 0
     for unit in units:
@@ -361,10 +340,7 @@ def main() -> int:
             rebuild_index(source)
 
     verb = "would copy" if args.dry_run else "copied"
-    print(
-        f"\nOffload complete: {verb} {total_copied} changed file(s), "
-        f"skipped {total_skipped} unchanged file(s), {total_bytes} byte(s) transferred."
-    )
+    print(f"\nOffload complete: {verb} {total_copied} changed file(s), skipped {total_skipped} unchanged file(s), {total_bytes} byte(s) transferred.")
     if args.move and not args.dry_run:
         print("Source repository units were removed only after successful copy verification.")
     return 0
