@@ -1,75 +1,127 @@
 # OFFLINEREPO
 
-Portable, config-driven Linux repository mirroring for disconnected, lab, air-gapped, and recovery environments.
+Portable, config-driven Linux repository mirroring for disconnected, lab, air-gapped, recovery, and bandwidth-constrained environments.
 
-OFFLINEREPO pulls vendor repositories while online, stores them on removable or permanent storage, and leaves the resulting trees ready to serve over ordinary HTTP inside a disconnected network.
+OFFLINEREPO mirrors vendor repositories while connected, keeps every selected repository independently stateful, and leaves each synchronized unit ready to move, copy, or serve over ordinary HTTP.
 
 ## Supported repository families
 
 | Platform | Default profile | Mirror method | Notes |
 |---|---|---|---|
 | Debian | 13 / Trixie | aptly | base, updates, security |
-| Ubuntu | 24.04 LTS / Noble | aptly | base, updates, security; 26.04 LTS / Resolute profiles included but disabled |
+| Ubuntu | 24.04 LTS / Noble | aptly | 26.04 LTS / Resolute profiles included but disabled |
 | Kali | rolling | aptly | main, contrib, non-free, non-free-firmware |
-| Proxmox VE | PVE 9 / Trixie | aptly | pve-no-subscription and Ceph Squid no-subscription |
+| Proxmox VE | PVE 9 / Trixie | aptly | PVE and Ceph no-subscription profiles |
 | Fedora | 44 | DNF5 reposync | Fedora and updates |
 | Rocky Linux | 9 | DNF reposync | BaseOS, AppStream, extras |
-| RHEL | 9 | host DNF reposync | BaseOS and AppStream from a registered RHEL host; no Satellite required |
+| RHEL | 9 | host DNF reposync | registered RHEL host; Satellite is not required |
 | Alpine | 3.24 | rsync | main and community, x86_64 by default |
-| NVIDIA CUDA | opt-in | aptly / DNF reposync | Debian 12/13, Ubuntu 24.04/26.04, RHEL/Rocky 9, Fedora 44 platform channels |
+| NVIDIA CUDA | opt-in | aptly / DNF reposync | Debian, Ubuntu, RHEL/Rocky, Fedora platform channels |
 
-All profiles are disabled by default. Enable only what the portable repository actually needs. Full distro and CUDA mirrors can consume substantial storage.
+All profiles are disabled by default. **`config.yml` is the source of truth.** The normal command is always:
 
-NVIDIA publishes CUDA as distro/platform repository channels rather than a separate repository URL for each toolkit major. Mirroring a selected platform channel makes the CUDA 12 and CUDA 13 packages that NVIDIA still carries in that channel available offline. CUDA profiles are intentionally opt-in.
+```bash
+./offline-repoctl sync
+```
 
-For the full payload-reuse and removable-storage contract, see [FULL-SYNC-READINESS.md](FULL-SYNC-READINESS.md).
+There is no second batch-selection interface. OFFLINEREPO synchronizes the profiles, mirrors, repos, suites, components, and architectures that are enabled in `config.yml` at that moment.
 
-## Repository layout
+For the repository-unit model and transfer workflow, see [PORTABLE-UNITS.md](PORTABLE-UNITS.md). For the synchronization contract, see [FULL-SYNC-READINESS.md](FULL-SYNC-READINESS.md).
 
-The configured `paths.repo_root` is runtime data, not this Git repository.
+## Repository units
+
+OFFLINEREPO does not require one giant repository state.
+
+The independently movable unit is the lowest configured repository boundary:
+
+- **APT:** one enabled `mirrors:` entry. Its selected `components:` are published together as one normal signed APT distribution.
+- **RPM:** one enabled `repos:` entry / repo ID.
+- **Alpine:** one enabled mirror.
+
+A representative runtime tree looks like:
 
 ```text
 OFFLINEREPO/
 ├── apt/
-│   ├── state/                 # aptly database, package pool, snapshots
-│   ├── debian/...             # published APT trees
-│   ├── ubuntu/...
-│   ├── kali/...
-│   ├── proxmox/...
-│   └── cuda/...
+│   ├── debian/
+│   │   ├── debian-trixie/
+│   │   │   ├── .state/aptly/       # state for this suite only
+│   │   │   ├── dists/trixie/
+│   │   │   ├── pool/
+│   │   │   └── .offlinerepo-unit.json
+│   │   └── debian-trixie-security/
+│   ├── kali/kali-rolling/
+│   └── proxmox/proxmox-pve-trixie/
 ├── rpm/
-│   ├── fedora/44/...
-│   ├── rocky/9/...
-│   ├── rhel/9/...
-│   └── cuda-*/...
+│   └── rocky/9/
+│       ├── baseos/
+│       └── appstream/
 ├── apk/
-│   └── alpine/...
-├── keys/
-│   ├── offline-repo-signing-public.asc
-│   └── offline-repo-signing-public.gpg
-└── serve-offlinerepo.py       # copied here by sync for disconnected serving
+│   └── alpine/
+│       ├── alpine-v3.24-main/
+│       └── alpine-v3.24-community/
+├── keys/                           # public keys only
+├── .offlinerepo-index.json         # local inventory, not served
+├── serve-offlinerepo.py
+└── offload-offlinerepo.py
 ```
 
-The private APT signing key does **not** belong in this tree.
+The private APT publishing key never belongs in this tree.
+
+### Why per-unit APT state matters
+
+APT is the repository family that needs the extra architecture. Each configured suite/mirror gets its own aptly database and package pool under `.state/`, and its own signed publication at the unit root.
+
+For example, `debian-trixie` can contain `main`, `contrib`, and `non-free-firmware`, while `debian-trixie-security` is a separate signed unit. Kali and Proxmox are separate again.
+
+That means a suite can be:
+
+- synchronized incrementally by itself;
+- served directly from removable media;
+- copied or moved to disconnected storage;
+- brought back later with its own state for another incremental update.
+
+The tradeoff is intentional: package bytes shared between two different APT suites are no longer deduplicated through one global aptly pool. In return, no suite depends on a giant shared synchronization database.
 
 ## First-time setup
 
 ```bash
 git clone https://github.com/bobbymayyy/OFFLINEREPO.git
 cd OFFLINEREPO
-
 ./offline-repoctl bootstrap
 ```
 
-Edit `config.yml` and set at minimum:
+Set the staging root and serving URL in `config.yml`:
 
 ```yaml
 paths:
   repo_root: /path/to/OFFLINEREPO
-  publish_url_base: http://repo.local/repo
+  permanent_root: ""
+  publish_url_base: http://repo.local:8080
 ```
 
-Then enable the desired distro profiles. CUDA requires both the parent `cuda` APT profile and the desired per-platform mirror entry to be enabled. RPM CUDA profiles are separate opt-in profiles.
+Then enable exactly what you want synchronized. Child `enabled:` values are honored too, so an enabled distro does not require every suite or repo under it to be selected.
+
+Example idea:
+
+```yaml
+apt:
+  - name: debian
+    enabled: true
+    mirrors:
+      - mirror_name: debian-trixie
+        enabled: true
+        # ...
+        components: [main, contrib, non-free-firmware]
+      - mirror_name: debian-trixie-updates
+        enabled: false
+        # ...
+
+rpm:
+  - name: rocky
+    enabled: false
+    # ...
+```
 
 Build the helper images once:
 
@@ -77,106 +129,91 @@ Build the helper images once:
 ./offline-repoctl build-images
 ```
 
-Validate configuration syntax and local invariants:
+Then the ordinary operating sequence is:
 
 ```bash
 ./offline-repoctl validate
+./offline-repoctl preflight
+./offline-repoctl sync
+./offline-repoctl state
 ```
 
-Before committing storage and bandwidth to the mirror, run the package reachability dry run:
+`state` lists the independent repository units that are actually present in `paths.repo_root`.
+
+## Bandwidth-constrained staged synchronization
+
+Nothing special changes at the command line.
+
+For one trip, enable Debian and Kali in `config.yml`, plus only the suites/components you actually want:
 
 ```bash
 ./offline-repoctl preflight
-```
-
-Then sync:
-
-```bash
 ./offline-repoctl sync
 ```
 
-A successful sync also copies the small standard-library `serve-offlinerepo.py` helper into `paths.repo_root`. That makes the resulting drive self-serving after it is moved into a disconnected environment.
+Move the drive across the boundary and either serve it directly or offload those units.
 
-The TUI exposes the same validate, preflight, sync, and log operations:
+For a later trip, change `config.yml`: disable the repositories you do not need to refresh on this trip, enable Proxmox and Rocky, then run the exact same commands:
 
 ```bash
-./offline-repoctl tui
+./offline-repoctl preflight
+./offline-repoctl sync
 ```
 
-`bootstrap` is explicit and one-time. Normal commands no longer run operating-system updates or install packages as a side effect.
+The disconnected side may contain Debian and Kali already. Adding Proxmox and Rocky does not require rebuilding or merging their package-manager state with the earlier repositories.
+
+## Incremental download behavior
+
+OFFLINEREPO must refresh repository metadata to discover upstream changes. The expensive package payloads remain incremental:
+
+- **APT / aptly:** each unit's package pool is reused on later `aptly mirror update` runs. OFFLINEREPO deliberately does not use aptly's `-skip-existing-packages` shortcut, so a payload that the database references but the drive has actually lost can be repaired.
+- **RPM / DNF4 / DNF5:** reposync reuses RPMs already present locally, preserves upstream timestamps with `--remote-time`, and removes content that disappeared upstream with `--delete`.
+- **Alpine / rsync:** the normal size/mtime quick check avoids retransferring unchanged files. Interrupted payloads live under `.rsync-partial` for reuse on the next run.
+
+A blanket “never replace an existing path” option is intentionally avoided because repository indexes and rare same-path upstream corrections still need to change.
 
 ## Package reachability preflight
 
-`validate` intentionally remains a fast, local configuration check. `preflight` is the network-aware dry run that answers a different question: **can the enabled repositories be resolved correctly, and can every enumerated package payload actually be reached before a large synchronization begins?**
+`validate` checks local configuration and invariants. `preflight` is the network-aware dry run:
 
 ```bash
 ./offline-repoctl preflight
 ```
 
-The command does not intentionally download package payloads into `repo_root`. It does fetch the repository metadata needed to discover the package set and then reports every package with an `[OK]` or `[FAIL]` line. A complete transcript is written to:
+It enumerates the payloads selected by the enabled configuration and checks whether they can be reached without intentionally downloading the complete package files into `repo_root`.
 
-```text
-logs/preflight.log
-```
+- APT exercises repository metadata, suite/component resolution, and upstream signature trust before probing package URLs.
+- RPM uses reposync URL enumeration and probes each returned RPM URL.
+- Alpine uses rsync dry-run listing against each selected source/architecture.
 
-The preflight behavior follows each repository family:
-
-- **APT / aptly:** OFFLINEREPO asks aptly to create temporary mirror definitions with the configured URL, suite, components, architectures, and upstream keyrings. This catches bad URLs, nonexistent distributions/components, and Release-signature failures using aptly's own parsing/trust path. OFFLINEREPO then fetches the Release/InRelease and package indexes, verifies package-index size/SHA256 values when provided by Release metadata, enumerates every referenced `.deb`, source payload, and configured `.udeb`, and probes each package URL. Temporary aptly state is discarded after the check.
-- **RPM / DNF:** OFFLINEREPO runs `dnf reposync --urls`/`dnf5 reposync --urls` against the configured repository. This resolves the same repo metadata and package set without downloading RPM payloads. Every returned RPM URL is then probed individually. Explicit CUDA GPG-key URLs are probed as well.
-- **Alpine / rsync:** OFFLINEREPO performs an rsync dry run against each configured source/architecture. Every `.apk` returned by the source listing is printed as reachable. A bad rsync URI/module/path fails the family preflight.
-
-HTTP/HTTPS package probes use `HEAD` first. If an upstream rejects `HEAD`, OFFLINEREPO falls back to a one-byte range GET, so the reachability check does not intentionally transfer the complete package. The preflight exits nonzero if any repository setup, metadata fetch, or package probe fails, but continues through the other enabled repositories so the final log contains the full failure set.
-
-For large distributions this can still generate many requests because the point is to test **every package URL that would be mirrored**. Tune the concurrency and timeouts in `config.yml` if necessary:
-
-```yaml
-global:
-  preflight_concurrency: 8
-  preflight_timeout_sec: 15
-  preflight_metadata_timeout_sec: 120
-```
-
-Preflight is a reachability/planning test, not a replacement for synchronization-time cryptographic verification. Actual APT/RPM sync continues to perform the configured upstream signature/package checks.
-
-## Incremental synchronization behavior
-
-OFFLINEREPO refreshes repository metadata on every sync because that is how it discovers new and removed packages. The large package payloads remain incremental:
-
-- **APT / aptly:** package files are kept in aptly's deduplicated package pool under `apt/state/`. Re-running `aptly mirror update` reuses payloads already present in that pool and can safely be restarted after interruption. OFFLINEREPO does not use aptly's `-skip-existing-packages` shortcut because the default existence check can repair a package file that the database references but the portable drive has lost.
-- **RPM / DNF4 / DNF5:** reposync does not download RPM payloads already present in the destination. OFFLINEREPO requests `--remote-time` as well, then uses `--delete` to remove payloads that have disappeared upstream.
-- **Alpine / rsync:** rsync's normal size/mtime quick check avoids retransferring unchanged files. Partial transfers live in `.rsync-partial` and are reused on the next run instead of appearing as complete `.apk` files.
-
-A blanket `ignore existing files forever` mode is intentionally not used because repository indexes and rare same-path upstream corrections must remain updateable.
+The transcript is written to `logs/preflight.log`.
 
 ## Why APT needs an OFFLINEREPO signing key
 
-There are two different trust jobs and therefore two different sets of keys.
+There are two trust jobs.
 
-**Upstream archive keys** authenticate what OFFLINEREPO downloads. Debian content is checked with Debian's archive keyring, Ubuntu with Ubuntu's, Kali with Kali's, Proxmox with Proxmox's, and CUDA with NVIDIA's. These trust sets are deliberately scoped so a key trusted for one vendor is not automatically trusted for another.
+**Upstream archive keys** authenticate what OFFLINEREPO downloads. Debian content is checked using Debian trust, Ubuntu using Ubuntu trust, Kali using Kali trust, Proxmox using Proxmox trust, and NVIDIA using NVIDIA trust.
 
-**The OFFLINEREPO publishing key** authenticates what offline APT clients receive from this mirror. aptly snapshots and republishes packages, generating new `Release`, `Release.gpg`, and `InRelease` metadata. The original vendor signature cannot authenticate metadata that aptly has regenerated, so the published repository must be signed again with a key that you control.
+**The OFFLINEREPO publishing key** authenticates the new APT metadata produced by aptly. Once OFFLINEREPO republishes selected snapshots/components, it creates new `Release`, `Release.gpg`, and `InRelease` metadata. Offline clients therefore need a key you control to authenticate those publications.
 
-This does not mean OFFLINEREPO is replacing upstream verification. The flow is:
+One dedicated OFFLINEREPO signing identity can sign many independent APT units. Each unit has its own signed metadata; you do not need a different private key for every suite.
+
+The trust flow is:
 
 ```text
 vendor repository
-    │
-    │ verify vendor Release/InRelease with vendor key
+    │ verify vendor metadata with vendor key
     ▼
-aptly mirror + snapshot
-    │
-    │ generate new repository metadata
+aptly mirror + snapshot for one configured unit
+    │ generate unit-specific repository metadata
     ▼
-OFFLINEREPO published APT tree
-    │
+independent OFFLINEREPO APT unit
     │ sign with OFFLINEREPO private key
     ▼
 offline client verifies with OFFLINEREPO public key
 ```
 
-### Create the signing key
-
-A dedicated repository-signing key is preferable to a personal identity key.
+### Create the publishing key
 
 ```bash
 install -d -m 0700 ~/.config/offline-repo
@@ -194,105 +231,70 @@ printf 'Fingerprint: %s\n' "$FPR"
 gpg --armor --export-secret-keys "$FPR" \
   > ~/.config/offline-repo/repo-signing-private.asc
 chmod 0600 ~/.config/offline-repo/repo-signing-private.asc
-
-gpg --armor --export "$FPR" \
-  > ~/.config/offline-repo/repo-signing-public.asc
 ```
 
-Put the full fingerprint into `config.yml`:
+Configure the full fingerprint and private-key path:
 
 ```yaml
 global:
   aptly_gpg_key: "FULL_FINGERPRINT_HERE"
   aptly_private_key_file: ~/.config/offline-repo/repo-signing-private.asc
+  aptly_gpg_passphrase_file: ""
 ```
 
-For unattended sync, a dedicated signing key without an interactive passphrase is the simplest model when the sync host itself is encrypted and access-controlled. If a passphrase is used, configure a root/user-readable-only file:
+For unattended operation, a dedicated signing key without an interactive passphrase is the simplest model when the sync host itself is appropriately protected. If a passphrase file is configured, protect it with mode `0600`.
 
-```yaml
-global:
-  aptly_gpg_passphrase_file: ~/.config/offline-repo/repo-signing-passphrase
-```
+During APT sync, the private key is bind-mounted read-only into the helper container and imported into a temporary `GNUPGHOME`. Only the public key is exported into portable repository storage. The temporary GnuPG home is deleted when the sync completes.
 
-Protect that file with mode `0600`. A passphrase stored beside the key should not be treated as a separate security boundary.
+Back up the private key separately. Losing it prevents future publications from being signed with the identity existing clients trust.
 
-During APT sync, `offline-repoctl` bind-mounts the private key read-only into the helper container. `sync_apt.py` imports it into a temporary `GNUPGHOME`, signs the publication, exports only the public key into `repo_root/keys/`, and deletes the temporary GnuPG home. The private key is never intentionally copied to the portable repository.
+## APT suite and component handling
 
-Back up the private key separately. Losing it means future repository metadata cannot be signed with the key your existing offline clients trust. If the key is compromised, rotate it and redistribute the new public key to clients.
-
-## APT component handling
-
-aptly merges components when a multi-component upstream is mirrored as a single aptly mirror. OFFLINEREPO instead creates one internal aptly mirror and snapshot per component, then publishes those snapshots together. That preserves ordinary client lines such as:
+For a non-flat APT source, OFFLINEREPO creates one internal aptly mirror/snapshot per selected component, then publishes the selected snapshots together inside that suite's unit. This preserves normal client lines such as:
 
 ```text
-deb ... trixie main contrib non-free non-free-firmware
+deb [signed-by=/usr/share/keyrings/offline-repo.gpg] http://repo.local:8080/apt/debian/debian-trixie trixie main contrib non-free-firmware
 ```
 
-Flat repositories such as NVIDIA CUDA use aptly's `./` distribution syntax internally and are republished under a normal local distribution/component name so clients can consume them consistently.
+Flat repositories such as NVIDIA CUDA are republished under the configured local distribution/component name so clients can consume them consistently.
 
-If you used an older OFFLINEREPO build to populate APT state already, its single-mirror component layout may not be switch-compatible with the new component-preserving publications. Use a fresh `apt/` state for the cleanest migration, or explicitly drop the old aptly publication before the first new sync. The tool does not destructively drop an existing publication automatically.
+### Migration from older shared APT state
+
+Older OFFLINEREPO work stored aptly state under a shared `apt/state/` tree. The independent-unit design does not modify that old database. The first sync with this design creates fresh state under each `apt/<profile>/<mirror>/.state/` unit.
+
+For a clean production migration, plan for the first per-unit APT run to populate the new unit state rather than assuming the old global aptly database can simply be split after the fact.
 
 ## Portable filesystem choice
 
-The default aptly publish method is `hardlink`, which avoids storing a second copy of every published `.deb` and is the most space-efficient option:
+The default APT publish method is:
 
 ```yaml
 global:
   aptly_publish_link_method: hardlink
 ```
 
-The repository drive must therefore use a filesystem that supports hardlinks. `offline-repoctl` tests this before APT sync. If the portable filesystem cannot create hardlinks, use:
+Within each APT unit, hardlinks let aptly's internal package pool and the published `pool/` tree share package bytes. Use a filesystem such as ext4 or XFS when practical.
+
+If the staging filesystem cannot create hardlinks:
 
 ```yaml
 global:
   aptly_publish_link_method: copy
 ```
 
-`copy` is more portable but can substantially increase APT storage usage because aptly's internal pool and published tree contain separate file copies.
+This uses more capacity but remains correct.
 
-The complete `repo_root` can be mounted at a different path or copied to another machine and served without rewriting repository metadata. If you copy a hardlink-mode tree and want to preserve its space efficiency, use a copy method that preserves hardlinks, such as `rsync -aH` or `cp -a`.
+The OFFLINEREPO offload helper attempts to preserve hardlink relationships on the destination. If the destination filesystem cannot create them, it falls back to copies.
 
-## RHEL without Satellite
+## Serving directly from the connected host or USB
 
-RHEL is intentionally handled differently from Rocky and Fedora. Full RHEL BaseOS/AppStream content requires Red Hat subscription entitlement, so OFFLINEREPO does not fake this with UBI or a generic container.
-
-Use a normal registered RHEL 9 machine as the online sync host, enable the `rhel` profile, and run:
-
-```bash
-subscription-manager identity
-./offline-repoctl preflight
-./offline-repoctl sync
-```
-
-`offline-repoctl` verifies registration for both preflight and sync. Sync enables the configured BaseOS/AppStream repository IDs with `subscription-manager` when necessary and runs `dnf reposync` on the host. Preflight does not enable repositories or mutate subscription-manager state. The resulting repository is still written to the same portable `repo_root` and can be served the same way as Rocky/Fedora mirrors. Satellite is not required.
-
-Use RHEL content in accordance with the subscription attached to the sync host.
-
-## RPM repository behavior
-
-RPM mirrors use `reposync --download-metadata`. The upstream RPM metadata is copied with the packages, so the resulting directory is immediately usable as a DNF/YUM repository and does not need `createrepo_c` for a full mirror. DNF4 and DNF5 reposync reuse RPM payloads that are already present locally instead of downloading them again.
-
-For Fedora/Rocky/RHEL, package GPG verification is enabled while syncing. CUDA uses an explicit NVIDIA `baseurl`. OFFLINEREPO downloads the matching NVIDIA RPM public key into `repo_root/keys/rpm/`, configures that key for the temporary CUDA repository, and keeps package signature verification enabled during mirroring. The generated offline client stanza points `gpgkey=` at the locally served copy and keeps `gpgcheck=1` enabled.
-
-Generate client `.repo` examples with:
-
-```bash
-./offline-repoctl export-snippets
-```
-
-## Alpine behavior
-
-Alpine mirrors use rsync and preserve Alpine's repository index/signature files. The default profile mirrors only `x86_64` instead of every architecture; add architectures under the Alpine profile if needed. Rsync's normal quick-check avoids sending unchanged file data. Partial downloads are retained under `.rsync-partial` so a rerun can reuse them without exposing an incomplete package as complete. `--delay-updates` and `--delete-delay` reduce the amount of time a repository being served during synchronization can expose a mixed old/new tree.
-
-## Serving the repository
-
-The built-in server is the simplest way to expose the exact same `repo_root` from the connected sync host:
+Serve the configured staging root from the connected host:
 
 ```bash
 ./offline-repoctl serve --bind 0.0.0.0 --port 8080
 ```
 
-After a successful sync, the repository root also contains a standalone copy that needs only Python 3. You can take the USB drive to the disconnected machine and serve it in place:
+A successful sync also installs portable helpers in `repo_root`. On the disconnected machine you can serve the removable drive in place:
 
 ```bash
 python3 /media/USB/OFFLINEREPO/serve-offlinerepo.py \
@@ -300,61 +302,96 @@ python3 /media/USB/OFFLINEREPO/serve-offlinerepo.py \
   --port 8080
 ```
 
-The portable server hides `apt/state/`, `logs/`, and dot-prefixed paths and disables directory listings. Those paths are synchronization state, not client-facing repository content.
+The server rejects dot-prefixed paths, so `.state/`, `.offlinerepo-unit.json`, and `.offlinerepo-index.json` are not exposed. Package metadata, packages, and public signing keys remain available.
 
-This is a static mirror, not an on-demand caching proxy. After the mirror has synchronized, however, clients can use the connected host or disconnected host as their single local repository endpoint in much the same practical way they would use a LAN package cache.
+This is a proactive static mirror rather than an on-demand proxy cache, but clients can use the connected or disconnected host as their single LAN repository endpoint after synchronization.
 
-Any other static HTTP server can serve the configured `repo_root` as well. Example NGINX configuration:
+## Copy or move repository units off USB
 
-```nginx
-server {
-    listen 80;
-    server_name repo.local;
+Copy every unit currently present on the removable root into a disconnected storage root:
 
-    # aptly state is needed for incremental sync, but it is not repository content.
-    location ^~ /repo/apt/state/ {
-        return 404;
-    }
-
-    location /repo/ {
-        alias /srv/OFFLINEREPO/;
-        autoindex off;
-    }
-}
+```bash
+python3 /media/USB/OFFLINEREPO/offload-offlinerepo.py \
+  /srv/OFFLINEREPO
 ```
 
-Copy or mount the portable repository at `/srv/OFFLINEREPO`. Do not expose `apt/state/`; it contains aptly's operational database and pool state, not client-facing repository metadata. Then use:
+Or free the USB after each unit is successfully copied and verified:
+
+```bash
+python3 /media/USB/OFFLINEREPO/offload-offlinerepo.py \
+  --move /srv/OFFLINEREPO
+```
+
+The operation is **unit-aware**:
+
+- if Rocky BaseOS is already present, only that BaseOS unit is reconciled;
+- stale files may be removed inside the BaseOS unit;
+- Debian, Kali, Proxmox, Alpine, or any other destination-only units are untouched;
+- with `--move`, a source unit is removed only after the destination copy verifies.
+
+The destination is still simply a collection of independent repository units. No giant package-manager repository is synthesized on the disconnected side.
+
+### Returning a unit for future incremental updates
+
+APT incremental state lives inside the unit. If you moved an APT unit off the USB and want to refresh it later, return the complete unit, including its hidden `.state/`, to the same staging path before the next connected sync.
+
+That is what makes the state portable rather than tied to one particular USB device or machine.
+
+## Optional `permanent_root`
+
+If `paths.permanent_root` is configured, `./offline-repoctl sync` copies repository units there with the same unit-aware offload logic. It does **not** mirror-delete the entire destination simply because some unrelated repository is disabled for the current sync.
+
+## RHEL without Satellite
+
+RHEL content is mirrored from a normal registered and entitled RHEL host. Satellite is not required.
+
+```bash
+subscription-manager identity
+./offline-repoctl preflight
+./offline-repoctl sync
+```
+
+The configured RHEL repo IDs are enabled through `subscription-manager` when needed, then DNF reposync writes the same independent RPM-unit layout used by the other RPM families.
+
+Use RHEL content in accordance with the subscription attached to the sync host.
+
+## NVIDIA CUDA
+
+CUDA profiles remain explicitly opt-in because the platform channels can be large. NVIDIA publishes distro/platform repositories that can contain multiple toolkit major versions. Enable only the platform channels needed for the disconnected environment.
+
+## Client configuration snippets
+
+Generate configuration only for repositories currently enabled in `config.yml`:
 
 ```bash
 ./offline-repoctl export-snippets
 ```
 
-The generated examples match the actual OFFLINEREPO paths, APT distributions/components, Fedora release, RHEL layout, and Alpine branch configured in `config.yml`.
-
-APT clients must install `keys/offline-repo-signing-public.gpg` and reference it with `signed-by=`. RPM clients keep package `gpgcheck=1`. Alpine clients use the distribution signing keys already provided by Alpine.
+APT clients install the OFFLINEREPO public key and use `signed-by=`. RPM clients keep package `gpgcheck=1`. Alpine clients continue to use Alpine's signing trust.
 
 ## Operational commands
 
 ```text
 ./offline-repoctl bootstrap          install host prerequisites once
-./offline-repoctl build-images       build helper containers using config tags
-./offline-repoctl validate           validate configuration without network/package probing
-./offline-repoctl preflight          enumerate and probe every package in enabled repositories
-./offline-repoctl sync               sync every enabled repository and install portable server helper
+./offline-repoctl build-images       build helper containers
+./offline-repoctl validate           validate config.yml selections
+./offline-repoctl preflight          probe enabled repositories and package payloads
+./offline-repoctl sync               sync exactly what is enabled in config.yml
+./offline-repoctl state              list synchronized repository units
 ./offline-repoctl serve [options]    serve paths.repo_root over HTTP
-./offline-repoctl install-server     refresh the portable HTTP helper in paths.repo_root
-./offline-repoctl tui                interactive menu
-./offline-repoctl export-snippets    print client configuration examples
+./offline-repoctl install-helpers    refresh portable serve/offload helpers
+./offline-repoctl tui                interactive interface
+./offline-repoctl export-snippets    print client configuration for enabled repositories
 ```
 
 ## Design notes
 
-- Repository families are independent. A failure in one mirror is reported without silently claiming success.
-- Preflight continues across enabled repositories so a single run can expose the complete set of unreachable sources/packages.
-- APT snapshots retain the configured number of generations and reuse aptly's deduplicated package pool.
-- RPM and APK synchronization use incremental tools and remove content that disappeared upstream.
-- APT upstream signing keys are narrowly scoped by vendor.
-- OFFLINEREPO's APT private signing key remains on the online sync host.
-- RHEL uses Red Hat's normal entitlement path without requiring Satellite.
-- CUDA platform mirrors are opt-in because they are large.
-- A synchronized `repo_root` is path-portable and can be served from USB, copied local storage, or the original connected host.
+- `config.yml` is the sole repository-selection interface.
+- Repository failures are reported rather than silently converted to success.
+- APT suites are independently stateful and independently signed.
+- APT components selected for one suite are published together as a normal multi-component distribution.
+- RPM and Alpine repository directories remain independent units.
+- Package payload reuse is preserved for APT, RPM, and APK synchronization.
+- Portable offload deletion is scoped to the same repository unit only.
+- OFFLINEREPO's private APT signing key remains on the connected sync host.
+- Public state manifests are intentionally hidden from HTTP clients.
