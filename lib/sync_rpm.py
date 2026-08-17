@@ -56,7 +56,7 @@ def main():
                 key_dir.mkdir(parents=True, exist_ok=True)
                 local_gpgkey = key_dir / f"{name}-{repoid}.pub"
                 tmp_key = local_gpgkey.with_suffix(local_gpgkey.suffix + ".tmp")
-                print(f"+ download {gpgkey_url} -> {local_gpgkey}", flush=True)
+                print(f"+ refresh {gpgkey_url} -> {local_gpgkey}", flush=True)
                 with urllib.request.urlopen(gpgkey_url, timeout=60) as response:
                     tmp_key.write_bytes(response.read())
                 if tmp_key.stat().st_size < 256:
@@ -82,6 +82,10 @@ def main():
                     f"--setopt={repoid}.gpgkey=file://{local_gpgkey}",
                 ]
 
+            # reposync is deliberately incremental: both DNF4 and DNF5 avoid
+            # re-downloading RPM payloads that are already present in the
+            # destination. --remote-time also preserves upstream timestamps,
+            # which makes portable copies easier to compare and resynchronize.
             cmd += [
                 "reposync",
                 "--repoid", repoid,
@@ -89,6 +93,7 @@ def main():
                 "--arch", "noarch",
                 "--destdir" if is_dnf5 else "--download-path", str(outdir),
                 "--download-metadata",
+                "--remote-time",
                 "--delete",
             ]
 
