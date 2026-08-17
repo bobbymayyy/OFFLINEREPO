@@ -28,11 +28,11 @@ If `debian-trixie` selects `main`, `contrib`, and `non-free-firmware`, aptly kee
 
 The same OFFLINEREPO signing identity may sign every APT unit. A separate private key per suite is not required. The private key remains on the connected sync host and is never copied into the repository unit.
 
-Because `.state/` lives inside the unit, the complete unit can be copied or moved independently and later returned to a connected sync host for incremental updates. The built-in HTTP server does not expose dot-prefixed state paths.
+Because `.state/` lives inside the unit, the complete unit can be copied or moved independently. The built-in HTTP server does not expose dot-prefixed state paths.
 
 ## RPM and Alpine units
 
-RPM reposync already produces one usable directory per repo ID:
+RPM reposync produces one usable directory per repo ID:
 
 ```text
 rpm/rocky/9/baseos/
@@ -58,29 +58,28 @@ Choose the repositories in `config.yml`, then run the normal commands:
 ./offline-repoctl validate
 ./offline-repoctl preflight
 ./offline-repoctl sync
+./offline-repoctl state
 ```
 
 There is no extra selector on `sync`.
 
 For example, on the first trip enable Debian and Kali plus the exact APT mirrors/components desired. Sync them, cross the gap, then either serve the USB directly or move its repository units to disconnected storage.
 
-On a later trip, change `config.yml` so Proxmox and Rocky are enabled and the earlier profiles are disabled if they are not needed on that trip. Running the same `./offline-repoctl sync` creates/updates those selected units.
+On a later trip, change `config.yml` so Proxmox and Rocky are enabled and the earlier profiles are disabled if they are not needed on that trip. Running the same `./offline-repoctl sync` creates or updates those selected units.
 
 ## Serve directly from removable media
 
-A successful sync leaves the portable HTTP helper in the repository root. Serve the entire removable root:
+A successful sync leaves the portable HTTP helper in the repository root:
 
 ```bash
 python3 /media/USB/OFFLINEREPO/serve-offlinerepo.py --bind 0.0.0.0 --port 8080
 ```
 
-The repository units remain independent even when one HTTP server exposes several of them.
-
-An individual APT unit can also be served as its own HTTP root if desired because it contains its own signed metadata and public signing key.
+The repository units remain independent even when one HTTP server exposes several of them. An individual APT unit can also be served as its own HTTP root because it contains its own signed metadata and public signing key.
 
 ## Copy or move units to the disconnected machine
 
-The sync also leaves `offload-offlinerepo.py` in the portable root. Copy all repository units currently present on the drive:
+Copy the repository units currently present on the drive:
 
 ```bash
 python3 /media/USB/OFFLINEREPO/offload-offlinerepo.py /srv/OFFLINEREPO
@@ -94,12 +93,35 @@ python3 /media/USB/OFFLINEREPO/offload-offlinerepo.py --move /srv/OFFLINEREPO
 
 The destination remains a directory of independent units. This is not a package-manager-level merge.
 
-If the destination already contains the same unit, only that unit is reconciled to the new source state. Destination-only files may be removed **inside that unit** after replacement metadata is copied. Other units are never removed merely because they are absent from the current USB.
+If the destination already contains the same unit, only that unit is reconciled to the new source state. Destination-only files may be removed **inside that unit** after replacement content is copied. Other units are never removed merely because they are absent from the current USB.
 
 The offload helper also preserves source hardlinks when the destination filesystem supports them, which keeps aptly's state/published package relationship space-efficient.
 
+## Keeping network incrementality after an emptied USB
+
+If `repo_root` is the USB and you use `--move`, the connected machine no longer has those package payloads unless another local copy exists. A state manifest alone cannot avoid a future network transfer because the packages themselves must physically exist somewhere before they can be carried across again.
+
+Use `paths.permanent_root` on the connected machine when you want to empty/reuse the USB **and** preserve incremental network behavior:
+
+```yaml
+paths:
+  repo_root: /media/USB/OFFLINEREPO
+  permanent_root: /srv/offlinerepo-cache
+```
+
+With that configured, the normal `./offline-repoctl sync` workflow does the bookkeeping automatically:
+
+1. determine the repository units enabled in `config.yml`;
+2. for each enabled unit missing from the returned USB, restore only that unit from `permanent_root`;
+3. run the normal APT/DNF/rsync synchronization so only upstream changes need network transfer;
+4. refresh the persistent copy after a successful sync.
+
+Disabled or unrelated repositories are not restored to the USB just because they exist in `permanent_root`.
+
+This gives you a persistent connected-side cache without changing the operator command. It does require enough connected-side storage to retain the units whose payloads you want to reuse later.
+
+If `permanent_root` is empty, the other option is to copy the complete unit back onto the USB before returning to the connected side. Otherwise a deleted payload is genuinely no longer local and must be downloaded again when needed.
+
 ## Stateful return trip
 
-If an APT unit was moved off the USB, its `.state/` moved with it. To update that same unit incrementally in the future, copy or move the complete unit back onto the removable staging tree before returning to the connected sync host. OFFLINEREPO will then resume from that unit's own aptly database and package pool.
-
-This is the tradeoff that makes each unit truly portable: its synchronization state travels with the unit instead of living in one global APT database.
+APT's `.state/` travels with its unit. That makes the unit portable rather than tied to one machine. When `permanent_root` is configured, the connected-side persistent copy retains that state and OFFLINEREPO can restore it automatically to removable staging. Without a persistent copy, return the complete unit if you want its next APT update to resume from the existing aptly database and pool.
