@@ -22,11 +22,20 @@ PY
 }
 
 if [[ ! -d "$TARGET/apt" && ! -d "$TARGET/rpm" && ! -d "$TARGET/apk" ]]; then
-  echo "Refusing to install helper: no apt/, rpm/, or apk/ directory under $TARGET" >&2
+  echo "Refusing to install helpers: no apt/, rpm/, or apk/ directory under $TARGET" >&2
   exit 1
 fi
 
-cp "$HERE/serve-offlinerepo.py" "$TARGET/serve-offlinerepo.py"
-chmod 0755 "$TARGET/serve-offlinerepo.py" 2>/dev/null || true
+for helper in serve-offlinerepo.py merge-offlinerepo.py; do
+  [[ -f "$HERE/$helper" ]] || {
+    echo "Missing portable helper: $HERE/$helper" >&2
+    exit 1
+  }
+  cp "$HERE/$helper" "$TARGET/$helper"
+  chmod 0755 "$TARGET/$helper" 2>/dev/null || true
+done
+
 printf 'Portable server installed: %s\n' "$TARGET/serve-offlinerepo.py"
-printf 'On the disconnected host: python3 %q --bind 0.0.0.0 --port 8080\n' "$TARGET/serve-offlinerepo.py"
+printf 'Portable merge helper installed: %s\n' "$TARGET/merge-offlinerepo.py"
+printf 'Serve on the disconnected host: python3 %q --bind 0.0.0.0 --port 8080\n' "$TARGET/serve-offlinerepo.py"
+printf 'Merge this batch into a cumulative tree: python3 %q /srv/OFFLINEREPO\n' "$TARGET/merge-offlinerepo.py"
