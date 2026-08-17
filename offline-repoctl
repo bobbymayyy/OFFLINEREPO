@@ -122,6 +122,34 @@ for item in cfg.get('rpm', []) or []:
 PYCFG
 }
 
+py_enabled_unit_ids() {
+  python3 - "$CFG" <<'PYCFG'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
+for distro in cfg.get('apt', []) or []:
+    if not distro.get('enabled', False):
+        continue
+    profile = str(distro.get('name', '')).strip()
+    for mirror in distro.get('mirrors', []) or []:
+        if mirror.get('enabled', True):
+            print(f"apt:{profile}:{mirror['mirror_name']}")
+for distro in cfg.get('rpm', []) or []:
+    if not distro.get('enabled', False):
+        continue
+    profile = str(distro.get('name', '')).strip()
+    for repo in distro.get('repos', []) or []:
+        if repo.get('enabled', True):
+            print(f"rpm:{profile}:{repo['repoid']}")
+for distro in cfg.get('apk', []) or []:
+    if not distro.get('enabled', False):
+        continue
+    profile = str(distro.get('name', '')).strip()
+    for mirror in distro.get('mirrors', []) or []:
+        if mirror.get('enabled', True):
+            print(f"apk:{profile}:{mirror['mirror_name']}")
+PYCFG
+}
+
 validate_repo_root() {
   local repo_root="$1"
   [[ -n "$repo_root" ]] || { echo "paths.repo_root is empty in config.yml" >&2; return 1; }
@@ -200,6 +228,7 @@ container_run() {
   "$engine" run --rm \
     -e CFG=/work/config.yml \
     -e REPO_ROOT=/repo \
+    -e OFFLINEREPO_RUN_ID="${OFFLINEREPO_RUN_ID:-}" \
     -v "$CFG:/work/config.yml:ro" \
     -v "$HERE/lib:/work/lib:ro" \
     -v "$repo_mount" \
@@ -209,24 +238,25 @@ container_run() {
 }
 
 check_apt_publish_fs() {
-  local method repo_root test_a test_b
+  local method repo_root test_a test_b test_dir
   method="$(py_get global.aptly_publish_link_method)"
   [[ -n "$method" ]] || method=hardlink
   [[ "$method" == hardlink ]] || return 0
 
   repo_root="$(py_get_path paths.repo_root)"
   validate_repo_root "$repo_root"
-  mkdir -p "$repo_root/apt/state"
-  test_a="$repo_root/apt/state/.offlinerepo-link-test.$$"
-  test_b="$repo_root/apt/.offlinerepo-link-test.$$"
+  test_dir="$repo_root/apt/.offlinerepo-hardlink-test.$$"
+  mkdir -p "$test_dir"
+  test_a="$test_dir/source"
+  test_b="$test_dir/link"
   : > "$test_a"
   if ! ln "$test_a" "$test_b" 2>/dev/null; then
-    rm -f "$test_a" "$test_b"
+    rm -rf "$test_dir"
     echo "The repository filesystem does not support hardlinks." >&2
     echo "Set global.aptly_publish_link_method: copy (uses more space) or use a hardlink-capable filesystem." >&2
     return 1
   fi
-  rm -f "$test_a" "$test_b"
+  rm -rf "$test_dir"
 }
 
 sync_apt() {
@@ -278,13 +308,13 @@ check_rhel_entitlement() {
 }
 
 sync_rpm() {
-  local distro runner
+  local distro runner rc=0
   while IFS=$'\t' read -r distro runner; do
     [[ -n "$distro" ]] || continue
 
     if [[ "$runner" == host ]]; then
       if [[ "$distro" == rhel ]]; then
-        prepare_rhel
+        prepare_rhel || { rc=1; continue; }
       fi
       local repo_root
       repo_root="$(py_get_path paths.repo_root)"
@@ -292,11 +322,13 @@ sync_rpm() {
       mkdir -p "$repo_root/rpm"
       log "[INFO] starting RPM sync for $distro on host"
       if CFG="$CFG" REPO_ROOT="$repo_root" ONLY_RPM_NAME="$distro" \
+        OFFLINEREPO_RUN_ID="${OFFLINEREPO_RUN_ID:-}" \
+        PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" \
         python3 "$HERE/lib/sync_rpm.py" |& tee -a "$HERE/logs/sync_rpm.log"; then
         log "[INFO] completed RPM sync for $distro successfully"
       else
         log "[ERROR] RPM sync failed for $distro"
-        return 1
+        rc=1
       fi
       continue
     fi
@@ -307,7 +339,8 @@ sync_rpm() {
       rocky) image="$(py_get containers.rocky_image)" ;;
       *)
         echo "Unknown RPM runner '$runner' for '$distro'. Use fedora, rocky, or host." >&2
-        return 1
+        rc=1
+        continue
         ;;
     esac
 
@@ -316,9 +349,10 @@ sync_rpm() {
       log "[INFO] completed RPM sync for $distro successfully"
     else
       log "[ERROR] RPM sync failed for $distro"
-      return 1
+      rc=1
     fi
   done < <(py_enabled_rpm_specs)
+  return "$rc"
 }
 
 sync_apk() {
@@ -419,15 +453,87 @@ preflight_apk() {
   fi
 }
 
+install_portable_helpers() {
+  local repo_root
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
+  mkdir -p "$repo_root"
+
+  [[ -f "$HERE/serve-offlinerepo.py" ]] || {
+    echo "Portable server source missing: $HERE/serve-offlinerepo.py" >&2
+    return 1
+  }
+  [[ -f "$HERE/lib/offload-offlinerepo.py" ]] || {
+    echo "Portable offload source missing: $HERE/lib/offload-offlinerepo.py" >&2
+    return 1
+  }
+
+  cp "$HERE/serve-offlinerepo.py" "$repo_root/serve-offlinerepo.py"
+  cp "$HERE/lib/offload-offlinerepo.py" "$repo_root/offload-offlinerepo.py"
+  chmod 0755 "$repo_root/serve-offlinerepo.py" "$repo_root/offload-offlinerepo.py" 2>/dev/null || true
+  python3 "$HERE/lib/unit_state.py" index "$repo_root"
+  log "[INFO] installed portable HTTP/offload helpers in $repo_root"
+}
+
+serve_repo() {
+  local repo_root
+  need python3
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
+  [[ -d "$repo_root" ]] || {
+    echo "Repository root does not exist: $repo_root" >&2
+    return 1
+  }
+  exec python3 "$HERE/serve-offlinerepo.py" --root "$repo_root" "$@"
+}
+
+show_state() {
+  local repo_root
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
+  python3 "$HERE/lib/unit_state.py" show "$repo_root"
+}
+
+hydrate_from_permanent() {
+  local repo_root permanent unit_id
+  local -a missing=() args=()
+  repo_root="$(py_get_path paths.repo_root)"
+  permanent="$(py_get_path paths.permanent_root)"
+  [[ -n "$permanent" && -d "$permanent" ]] || return 0
+  validate_repo_root "$repo_root"
+  [[ "$repo_root" != "$permanent" ]] || return 0
+
+  while IFS= read -r unit_id; do
+    [[ -n "$unit_id" ]] || continue
+    if ! python3 "$HERE/lib/unit_state.py" has "$repo_root" "$unit_id"; then
+      missing+=("$unit_id")
+    fi
+  done < <(py_enabled_unit_ids)
+
+  [[ "${#missing[@]}" -gt 0 ]] || return 0
+  log "[INFO] restoring ${#missing[@]} enabled repository unit(s) from paths.permanent_root before sync"
+  for unit_id in "${missing[@]}"; do
+    args+=(--unit "$unit_id")
+  done
+  python3 "$HERE/lib/offload-offlinerepo.py" \
+    --source "$permanent" \
+    --ignore-missing-units \
+    "${args[@]}" \
+    "$repo_root" |& tee -a "$HERE/logs/hydrate_permanent.log"
+}
+
 sync_permanent() {
   local repo_root permanent
   repo_root="$(py_get_path paths.repo_root)"
   permanent="$(py_get_path paths.permanent_root)"
   [[ -n "$permanent" ]] || return 0
   validate_repo_root "$repo_root"
-  need rsync
+  [[ "$repo_root" != "$permanent" ]] || {
+    echo "paths.permanent_root must differ from paths.repo_root" >&2
+    return 1
+  }
   mkdir -p "$permanent"
-  rsync -aH --partial --delay-updates --delete-delay "$repo_root"/ "$permanent"/ \
+  python3 "$HERE/lib/offload-offlinerepo.py" --source "$repo_root" "$permanent" \
     |& tee -a "$HERE/logs/sync_permanent.log"
 }
 
@@ -442,6 +548,8 @@ print('# APT: install OFFLINEREPO public signing key once on each client:')
 print(f'#   wget -qO /tmp/offline-repo.gpg {base}/keys/offline-repo-signing-public.gpg')
 print('#   sudo install -m 0644 /tmp/offline-repo.gpg /usr/share/keyrings/offline-repo.gpg')
 for distro in cfg.get('apt', []) or []:
+    if not distro.get('enabled', False):
+        continue
     name = distro.get('name')
     for mirror in distro.get('mirrors', []) or []:
         if not mirror.get('enabled', True):
@@ -455,6 +563,8 @@ for distro in cfg.get('apt', []) or []:
 
 print('\n# RPM/DNF/YUM repository examples. Package signature checking stays enabled.')
 for distro in cfg.get('rpm', []) or []:
+    if not distro.get('enabled', False):
+        continue
     name = distro.get('name')
     rel = distro.get('releasever', '')
     for repo in distro.get('repos', []) or []:
@@ -473,6 +583,8 @@ for distro in cfg.get('rpm', []) or []:
 
 print('\n# Alpine /etc/apk/repositories entries:')
 for distro in cfg.get('apk', []) or []:
+    if not distro.get('enabled', False):
+        continue
     name = distro.get('name')
     for mirror in distro.get('mirrors', []) or []:
         if mirror.get('enabled', True):
@@ -487,9 +599,13 @@ validate_config() {
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
 errors = []
-root = str((cfg.get('paths', {}) or {}).get('repo_root', ''))
+paths_cfg = cfg.get('paths', {}) or {}
+root = str(paths_cfg.get('repo_root', ''))
+permanent = str(paths_cfg.get('permanent_root', '')).strip()
 if not root or '<user>' in root:
     errors.append('paths.repo_root is unset or still contains <user>')
+if permanent and permanent == root:
+    errors.append('paths.permanent_root must differ from paths.repo_root')
 
 for family in ('apt', 'rpm', 'apk'):
     names = []
@@ -509,6 +625,21 @@ if any(d.get('enabled', False) for d in cfg.get('apt', []) or []):
     if link_method not in ('hardlink', 'copy'):
         errors.append('global.aptly_publish_link_method must be hardlink or copy')
 
+    for distro in cfg.get('apt', []) or []:
+        if not distro.get('enabled', False):
+            continue
+        enabled_mirrors = [m for m in distro.get('mirrors', []) or [] if m.get('enabled', True)]
+        if not enabled_mirrors:
+            errors.append(f"apt:{distro.get('name', '<unnamed>')} is enabled but has no enabled mirrors")
+
+for distro in cfg.get('rpm', []) or []:
+    if distro.get('enabled', False) and not any(r.get('enabled', True) for r in distro.get('repos', []) or []):
+        errors.append(f"rpm:{distro.get('name', '<unnamed>')} is enabled but has no enabled repos")
+
+for distro in cfg.get('apk', []) or []:
+    if distro.get('enabled', False) and not any(m.get('enabled', True) for m in distro.get('mirrors', []) or []):
+        errors.append(f"apk:{distro.get('name', '<unnamed>')} is enabled but has no enabled mirrors")
+
 global_cfg = cfg.get('global', {}) or {}
 for key in ('preflight_concurrency', 'preflight_timeout_sec', 'preflight_metadata_timeout_sec'):
     value = global_cfg.get(key)
@@ -526,7 +657,7 @@ if errors:
     for error in errors:
         print(f'ERROR: {error}', file=sys.stderr)
     raise SystemExit(1)
-print('Configuration syntax and basic invariants look good.')
+print('Configuration syntax and enabled repository selections look good.')
 PYCFG
 }
 
@@ -590,14 +721,34 @@ edit_config() {
 sync_all() {
   mkdir -p "$HERE/logs"
   validate_config
-  log "[INFO] sync_all started"
+  export OFFLINEREPO_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  log "[INFO] sync_all started run=$OFFLINEREPO_RUN_ID"
 
-  [[ "$(py_bool_any_enabled apt)" == yes ]] && sync_apt
-  [[ "$(py_bool_any_enabled rpm)" == yes ]] && sync_rpm
-  [[ "$(py_bool_any_enabled apk)" == yes ]] && sync_apk
+  local rc=0
+  hydrate_from_permanent || rc=1
+  if [[ "$(py_bool_any_enabled apt)" == yes ]]; then
+    sync_apt || rc=1
+  fi
+  if [[ "$(py_bool_any_enabled rpm)" == yes ]]; then
+    sync_rpm || rc=1
+  fi
+  if [[ "$(py_bool_any_enabled apk)" == yes ]]; then
+    sync_apk || rc=1
+  fi
 
-  sync_permanent
-  log "[INFO] sync_all finished"
+  install_portable_helpers || rc=1
+  if [[ "$rc" -eq 0 ]]; then
+    sync_permanent || rc=1
+  else
+    log "[WARN] skipping paths.permanent_root transfer because repository sync had failures"
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    log "[INFO] sync_all finished successfully"
+  else
+    log "[ERROR] sync_all finished with failures"
+  fi
+  return "$rc"
 }
 
 tui() {
@@ -611,12 +762,13 @@ tui() {
       3 "Validate configuration" \
       4 "Preflight enabled repositories (dry run)" \
       5 "Sync enabled repositories" \
-      6 "View controller log" \
-      7 "View preflight log" \
-      8 "Export client setup snippets" \
-      9 "Exit") || true
+      6 "View synchronized repository units" \
+      7 "View controller log" \
+      8 "View preflight log" \
+      9 "Export client setup snippets" \
+      10 "Exit") || true
 
-    case "${choice:-9}" in
+    case "${choice:-10}" in
       1) dialog --title "config.yml" --textbox "$CFG" 0 0 ;;
       2) edit_config ;;
       3)
@@ -635,17 +787,18 @@ tui() {
         fi
         ;;
       5)
-        dialog --infobox "Sync running..." 5 60
+        dialog --infobox "Syncing repositories enabled in config.yml..." 5 70
         if sync_all; then
           dialog --msgbox "Sync complete." 6 40
         else
           dialog --msgbox "Sync failed. Check logs." 7 60
         fi
         ;;
-      6) dialog --title "logs/offline-repoctl.log" --textbox "$HERE/logs/offline-repoctl.log" 0 0 ;;
-      7) dialog --title "logs/preflight.log" --textbox "$HERE/logs/preflight.log" 0 0 ;;
-      8) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
-      9) clear; exit 0 ;;
+      6) dialog --title "repository units" --msgbox "$(show_state)" 0 0 ;;
+      7) dialog --title "logs/offline-repoctl.log" --textbox "$HERE/logs/offline-repoctl.log" 0 0 ;;
+      8) dialog --title "logs/preflight.log" --textbox "$HERE/logs/preflight.log" 0 0 ;;
+      9) dialog --title "client snippets" --msgbox "$(export_snippets)" 0 0 ;;
+      10) clear; exit 0 ;;
     esac
   done
 }
@@ -655,8 +808,14 @@ case "${1:-}" in
   build-images) build_images ;;
   validate) validate_config ;;
   preflight) preflight_all ;;
-  tui) tui ;;
   sync) sync_all ;;
+  state) show_state ;;
+  serve)
+    shift
+    serve_repo "$@"
+    ;;
+  install-helpers|install-server) install_portable_helpers ;;
+  tui) tui ;;
   show-config) show_config ;;
   edit-config) edit_config ;;
   export-snippets) export_snippets ;;
@@ -666,8 +825,11 @@ Usage:
   $0 bootstrap          # install host prerequisites once
   $0 build-images       # build the configured APT/RPM helper images
   $0 validate           # validate config.yml without network/package probing
-  $0 preflight          # enumerate and probe every package in enabled repositories
-  $0 sync               # sync all enabled repositories
+  $0 preflight          # enumerate/probe repositories enabled in config.yml
+  $0 sync               # sync repositories enabled in config.yml
+  $0 state              # list independently synchronized repository units
+  $0 serve [options]    # serve paths.repo_root over HTTP (default 0.0.0.0:8080)
+  $0 install-helpers    # refresh portable HTTP/offload helpers in paths.repo_root
   $0 tui
   $0 show-config
   $0 edit-config
@@ -675,12 +837,13 @@ Usage:
 
 Typical first run:
   1. $0 bootstrap
-  2. edit config.yml (especially paths.repo_root and signing key fingerprint)
+  2. edit config.yml (repo_root, signing fingerprint, enabled suites/repos/components)
   3. create the APT publishing key as documented in README.md
   4. $0 build-images
   5. $0 validate
   6. $0 preflight
   7. $0 sync
+  8. $0 state
 EOF
     ;;
 esac

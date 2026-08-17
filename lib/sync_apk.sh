@@ -9,8 +9,12 @@ python3 - <<'PY'
 import os
 import pathlib
 import subprocess
+import sys
 
 import yaml
+
+sys.path.insert(0, "/work/lib")
+from unit_state import record_unit
 
 cfg = yaml.safe_load(open(os.environ["CFG"], "r", encoding="utf-8")) or {}
 repo_root = pathlib.Path(os.environ["REPO_ROOT"])
@@ -43,12 +47,15 @@ for distro in cfg.get("apk", []) or []:
                 destination = target / str(arch)
                 destination.mkdir(parents=True, exist_ok=True)
 
-            # Delay updates/deletes until the transfer is substantially complete so a
-            # repository being served during sync spends less time in a mixed state.
+            # rsync's normal quick-check skips payload data when destination size
+            # and mtime already match the source. Keep partial transfers in a
+            # hidden side directory so an interrupted .apk never looks complete.
+            # Do not use --ignore-existing: Alpine indexes must still refresh and
+            # a same-path upstream correction must be allowed to replace old data.
             cmd = [
                 "rsync",
                 "-aH",
-                "--partial",
+                "--partial-dir=.rsync-partial",
                 "--delay-updates",
                 "--delete-delay",
                 source,
@@ -56,4 +63,16 @@ for distro in cfg.get("apk", []) or []:
             ]
             print("+", " ".join(cmd), flush=True)
             subprocess.run(cmd, check=True)
+
+        record_unit(
+            repo_root,
+            family="apk",
+            profile=name,
+            name=mirror_name,
+            relative_path=target.relative_to(repo_root).as_posix(),
+            metadata={
+                "rsync_url": rsync_url,
+                "architectures": [str(x) for x in architectures if x is not None],
+            },
+        )
 PY

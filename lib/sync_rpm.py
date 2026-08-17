@@ -8,6 +8,8 @@ import urllib.request
 
 import yaml
 
+from unit_state import record_unit
+
 
 def run(cmd, check=True):
     print("+", " ".join(cmd), flush=True)
@@ -56,7 +58,7 @@ def main():
                 key_dir.mkdir(parents=True, exist_ok=True)
                 local_gpgkey = key_dir / f"{name}-{repoid}.pub"
                 tmp_key = local_gpgkey.with_suffix(local_gpgkey.suffix + ".tmp")
-                print(f"+ download {gpgkey_url} -> {local_gpgkey}", flush=True)
+                print(f"+ refresh {gpgkey_url} -> {local_gpgkey}", flush=True)
                 with urllib.request.urlopen(gpgkey_url, timeout=60) as response:
                     tmp_key.write_bytes(response.read())
                 if tmp_key.stat().st_size < 256:
@@ -82,6 +84,9 @@ def main():
                     f"--setopt={repoid}.gpgkey=file://{local_gpgkey}",
                 ]
 
+            # reposync is deliberately incremental: both DNF4 and DNF5 avoid
+            # re-downloading RPM payloads that are already present in the
+            # destination. --remote-time also preserves upstream timestamps.
             cmd += [
                 "reposync",
                 "--repoid", repoid,
@@ -89,6 +94,7 @@ def main():
                 "--arch", "noarch",
                 "--destdir" if is_dnf5 else "--download-path", str(outdir),
                 "--download-metadata",
+                "--remote-time",
                 "--delete",
             ]
 
@@ -96,6 +102,30 @@ def main():
                 cmd.append("--gpgcheck")
 
             run(cmd)
+
+            # DNF reposync stores each repository under a subdirectory named
+            # after its repo ID. That directory is a complete, independently
+            # transferable repository unit.
+            unit_dir = outdir / repoid
+            if not unit_dir.is_dir():
+                raise RuntimeError(
+                    f"reposync completed but expected repository directory is missing: {unit_dir}"
+                )
+            record_unit(
+                repo_root,
+                family="rpm",
+                profile=name,
+                name=repoid,
+                relative_path=unit_dir.relative_to(pathlib.Path(repo_root)).as_posix(),
+                metadata={
+                    "repoid": repoid,
+                    "releasever": releasever,
+                    "architecture": arch,
+                    "baseurl": baseurl or None,
+                    "package_gpgcheck": bool(repo.get("verify_packages", False)),
+                    "gpgkey_url": gpgkey_url or None,
+                },
+            )
 
     return 0
 
