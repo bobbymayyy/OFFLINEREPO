@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from unit_state import record_unit
+
 
 RETRYABLE_PATTERNS = [
     r"i/o timeout",
@@ -113,11 +115,7 @@ def dedupe(seq):
 
 
 def compute_keyrings(cfg, distro_cfg, mirror_cfg):
-    """Return only the keyrings intended to authenticate this upstream.
-
-    Per-distro keyrings take precedence over global defaults. A mirror can
-    replace or append to that trust set explicitly.
-    """
+    """Return only the keyrings intended to authenticate this upstream."""
     global_keys = _norm_list((cfg.get("global", {}) or {}).get("apt_keyrings_default"))
     distro_keys = _norm_list(distro_cfg.get("apt_keyrings"))
     base = distro_keys if distro_keys else global_keys
@@ -249,9 +247,16 @@ def setup_gpg(repo_root: str, cfg: Dict[str, Any]):
     return gpg_key, gnupg_home
 
 
-def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
-    apt_root = pathlib.Path(repo_root) / "apt"
-    state_root = apt_root / "state" / "aptly"
+def copy_public_keys_to_unit(repo_root: str, unit_root: pathlib.Path) -> None:
+    for name in ("offline-repo-signing-public.asc", "offline-repo-signing-public.gpg"):
+        source = pathlib.Path(repo_root) / "keys" / name
+        if source.is_file():
+            shutil.copy2(source, unit_root / name)
+
+
+def write_aptly_config(unit_root: pathlib.Path, cfg: Dict[str, Any]) -> pathlib.Path:
+    """Create an aptly database and publish endpoint dedicated to one APT unit."""
+    state_root = unit_root / ".state" / "aptly"
     state_root.mkdir(parents=True, exist_ok=True)
 
     global_cfg = cfg.get("global", {}) or {}
@@ -265,8 +270,8 @@ def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
         "gpgProvider": "gpg",
         "skipLegacyPool": True,
         "FileSystemPublishEndpoints": {
-            "portable": {
-                "rootDir": str(apt_root),
+            "unit": {
+                "rootDir": str(unit_root),
                 "linkMethod": str(
                     global_cfg.get("aptly_publish_link_method", "hardlink")
                 ),
@@ -274,7 +279,8 @@ def write_aptly_config(repo_root: str, cfg: Dict[str, Any]) -> pathlib.Path:
         },
     }
 
-    cfg_path = apt_root / "state" / "aptly.conf"
+    cfg_path = unit_root / ".state" / "aptly.conf"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(json.dumps(aptly_cfg, indent=2) + "\n", encoding="utf-8")
     return cfg_path
 
@@ -364,15 +370,23 @@ def main():
         print("No enabled APT mirrors; nothing to do.")
         return 0
 
-    pathlib.Path(repo_root, "apt").mkdir(parents=True, exist_ok=True)
+    apt_root = pathlib.Path(repo_root) / "apt"
+    apt_root.mkdir(parents=True, exist_ok=True)
+    legacy_state = apt_root / "state" / "aptly"
+    if legacy_state.exists():
+        print(
+            f"! NOTICE: legacy shared APT state exists at {legacy_state}; "
+            "new syncs use per-repository .state directories and do not modify that legacy database.",
+            file=sys.stderr,
+            flush=True,
+        )
+
     global_cfg = cfg.get("global", {}) or {}
     keep_n = int(global_cfg.get("keep_snapshots", 2))
     fail_fast = bool(global_cfg.get("fail_fast", False))
     cmd_timeout = int(global_cfg.get("cmd_timeout_sec", 0)) or None
 
-    aptly_cfg_path = write_aptly_config(repo_root, cfg)
     gpg_key, gnupg_home = setup_gpg(repo_root, cfg)
-
     publish_gpg_flags = [f"-gpg-key={gpg_key}", "-batch"]
     passphrase_file = os.environ.get("OFFLINEREPO_SIGNING_PASSPHRASE_FILE", "")
     if passphrase_file:
@@ -413,6 +427,9 @@ def main():
                     mirror.get("architectures", global_cfg.get("architectures", []))
                 )
                 arch_flag = ",".join(archs)
+                unit_root = apt_root / distro_name / mirror_name
+                unit_root.mkdir(parents=True, exist_ok=True)
+                aptly_cfg_path = write_aptly_config(unit_root, cfg)
 
                 try:
                     keyrings = compute_keyrings(cfg, distro, mirror)
@@ -495,7 +512,11 @@ def main():
                         )
                         snapshot_names.append(snapshot)
 
-                    prefix = f"filesystem:portable:{distro_name}/{mirror_name}"
+                    # Each configured APT mirror/suite is its own publication,
+                    # with its own aptly database and package pool under .state.
+                    # Multiple selected components are signed together as one
+                    # standard APT distribution for this unit.
+                    prefix = "filesystem:unit:."
                     component_arg = "-component=" + ",".join(publish_components)
                     published = run(
                         aptly_cmd(
@@ -546,6 +567,24 @@ def main():
                             keep_n,
                             cmd_timeout,
                         )
+
+                    copy_public_keys_to_unit(repo_root, unit_root)
+                    record_unit(
+                        repo_root,
+                        family="apt",
+                        profile=distro_name,
+                        name=mirror_name,
+                        relative_path=unit_root.relative_to(pathlib.Path(repo_root)).as_posix(),
+                        metadata={
+                            "source_url": url,
+                            "distribution": publish_distribution,
+                            "upstream_distribution": distribution,
+                            "components": publish_components,
+                            "architectures": archs,
+                            "signing_fingerprint": gpg_key,
+                            "signed_release": True,
+                        },
+                    )
 
                 except Exception as exc:
                     failures.append((distro_name, mirror_name, str(exc)))
