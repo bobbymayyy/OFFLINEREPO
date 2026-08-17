@@ -1,0 +1,8 @@
+# Runtime logs / Python cache
+logs/
+__pycache__/
+*.py[cod]
+
+# Never commit repository signing secrets.
+*repo-signing-private*
+*signing-passphrase*
