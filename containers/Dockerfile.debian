@@ -25,15 +25,24 @@ RUN curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg 
     -o /usr/share/keyrings/proxmox-release.gpg \
   && test -s /usr/share/keyrings/proxmox-release.gpg
 
-# NVIDIA's cuda-keyring package installs the CUDA archive verification key.
+# NVIDIA rotates repository keys per platform generation. OFFLINEREPO's APT
+# helper can mirror Debian 12/13 and Ubuntu 24.04/26.04 from one container, so
+# build a verification keyring containing the current keys published by each
+# configured upstream rather than installing only the Debian 13 cuda-keyring.
 RUN set -eux; \
-  . /etc/os-release; \
-  distro="$(printf '%s%s' "${ID}" "${VERSION_ID}" | tr -d .)"; \
-  deb="cuda-keyring_1.1-1_all.deb"; \
-  base="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64"; \
-  curl -fsSL "${base}/${deb}" -o "/tmp/${deb}"; \
-  dpkg -i "/tmp/${deb}"; \
-  rm -f "/tmp/${deb}"; \
+  tmp="$(mktemp -d)"; \
+  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/3bf863cc.pub -o "$tmp/debian12.pub"; \
+  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/8793F200.pub -o "$tmp/debian13.pub"; \
+  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub -o "$tmp/ubuntu2404.pub"; \
+  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/60DF8A40.pub -o "$tmp/ubuntu2604.pub"; \
+  gpg --batch --yes --dearmor -o "$tmp/debian12.gpg" "$tmp/debian12.pub"; \
+  gpg --batch --yes --dearmor -o "$tmp/debian13.gpg" "$tmp/debian13.pub"; \
+  gpg --batch --yes --dearmor -o "$tmp/ubuntu2404.gpg" "$tmp/ubuntu2404.pub"; \
+  gpg --batch --yes --dearmor -o "$tmp/ubuntu2604.gpg" "$tmp/ubuntu2604.pub"; \
+  cat "$tmp/debian12.gpg" "$tmp/debian13.gpg" "$tmp/ubuntu2404.gpg" "$tmp/ubuntu2604.gpg" \
+    > /usr/share/keyrings/cuda-archive-keyring.gpg; \
+  gpg --batch --show-keys /usr/share/keyrings/cuda-archive-keyring.gpg >/dev/null; \
+  rm -rf "$tmp"; \
   test -s /usr/share/keyrings/cuda-archive-keyring.gpg
 
 WORKDIR /work
