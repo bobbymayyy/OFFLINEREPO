@@ -43,12 +43,19 @@ for distro in cfg.get("apk", []) or []:
                 destination = target / str(arch)
                 destination.mkdir(parents=True, exist_ok=True)
 
-            # Delay updates/deletes until the transfer is substantially complete so a
-            # repository being served during sync spends less time in a mixed state.
+            # rsync's normal quick-check skips payload data when destination size
+            # and mtime already match the source. Keep partial transfers in a
+            # hidden side directory so an interrupted .apk never looks complete
+            # to a client, and reuse that partial data on the next run.
+            #
+            # Do not use --ignore-existing: Alpine indexes must still refresh and
+            # a same-path upstream correction must be allowed to replace old data.
+            # Delay updates/deletes until the transfer is substantially complete
+            # so a repository served during sync spends less time in a mixed state.
             cmd = [
                 "rsync",
                 "-aH",
-                "--partial",
+                "--partial-dir=.rsync-partial",
                 "--delay-updates",
                 "--delete-delay",
                 source,
