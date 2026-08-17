@@ -22,6 +22,8 @@ All profiles are disabled by default. Enable only what the portable repository a
 
 NVIDIA publishes CUDA as distro/platform repository channels rather than a separate repository URL for each toolkit major. Mirroring a selected platform channel makes the CUDA 12 and CUDA 13 packages that NVIDIA still carries in that channel available offline. CUDA profiles are intentionally opt-in.
 
+For the full payload-reuse and removable-storage contract, see [FULL-SYNC-READINESS.md](FULL-SYNC-READINESS.md).
+
 ## Repository layout
 
 The configured `paths.repo_root` is runtime data, not this Git repository.
@@ -42,9 +44,10 @@ OFFLINEREPO/
 │   └── cuda-*/...
 ├── apk/
 │   └── alpine/...
-└── keys/
-    ├── offline-repo-signing-public.asc
-    └── offline-repo-signing-public.gpg
+├── keys/
+│   ├── offline-repo-signing-public.asc
+│   └── offline-repo-signing-public.gpg
+└── serve-offlinerepo.py       # copied here by sync for disconnected serving
 ```
 
 The private APT signing key does **not** belong in this tree.
@@ -92,6 +95,8 @@ Then sync:
 ./offline-repoctl sync
 ```
 
+A successful sync also copies the small standard-library `serve-offlinerepo.py` helper into `paths.repo_root`. That makes the resulting drive self-serving after it is moved into a disconnected environment.
+
 The TUI exposes the same validate, preflight, sync, and log operations:
 
 ```bash
@@ -132,6 +137,16 @@ global:
 ```
 
 Preflight is a reachability/planning test, not a replacement for synchronization-time cryptographic verification. Actual APT/RPM sync continues to perform the configured upstream signature/package checks.
+
+## Incremental synchronization behavior
+
+OFFLINEREPO refreshes repository metadata on every sync because that is how it discovers new and removed packages. The large package payloads remain incremental:
+
+- **APT / aptly:** package files are kept in aptly's deduplicated package pool under `apt/state/`. Re-running `aptly mirror update` reuses payloads already present in that pool and can safely be restarted after interruption. OFFLINEREPO does not use aptly's `-skip-existing-packages` shortcut because the default existence check can repair a package file that the database references but the portable drive has lost.
+- **RPM / DNF4 / DNF5:** reposync does not download RPM payloads already present in the destination. OFFLINEREPO requests `--remote-time` as well, then uses `--delete` to remove payloads that have disappeared upstream.
+- **Alpine / rsync:** rsync's normal size/mtime quick check avoids retransferring unchanged files. Partial transfers live in `.rsync-partial` and are reused on the next run instead of appearing as complete `.apk` files.
+
+A blanket `ignore existing files forever` mode is intentionally not used because repository indexes and rare same-path upstream corrections must remain updateable.
 
 ## Why APT needs an OFFLINEREPO signing key
 
@@ -235,6 +250,8 @@ global:
 
 `copy` is more portable but can substantially increase APT storage usage because aptly's internal pool and published tree contain separate file copies.
 
+The complete `repo_root` can be mounted at a different path or copied to another machine and served without rewriting repository metadata. If you copy a hardlink-mode tree and want to preserve its space efficiency, use a copy method that preserves hardlinks, such as `rsync -aH` or `cp -a`.
+
 ## RHEL without Satellite
 
 RHEL is intentionally handled differently from Rocky and Fedora. Full RHEL BaseOS/AppStream content requires Red Hat subscription entitlement, so OFFLINEREPO does not fake this with UBI or a generic container.
@@ -253,7 +270,7 @@ Use RHEL content in accordance with the subscription attached to the sync host.
 
 ## RPM repository behavior
 
-RPM mirrors use `reposync --download-metadata`. The upstream RPM metadata is copied with the packages, so the resulting directory is immediately usable as a DNF/YUM repository and does not need `createrepo_c` for a full mirror.
+RPM mirrors use `reposync --download-metadata`. The upstream RPM metadata is copied with the packages, so the resulting directory is immediately usable as a DNF/YUM repository and does not need `createrepo_c` for a full mirror. DNF4 and DNF5 reposync reuse RPM payloads that are already present locally instead of downloading them again.
 
 For Fedora/Rocky/RHEL, package GPG verification is enabled while syncing. CUDA uses an explicit NVIDIA `baseurl`. OFFLINEREPO downloads the matching NVIDIA RPM public key into `repo_root/keys/rpm/`, configures that key for the temporary CUDA repository, and keeps package signature verification enabled during mirroring. The generated offline client stanza points `gpgkey=` at the locally served copy and keeps `gpgcheck=1` enabled.
 
@@ -265,11 +282,29 @@ Generate client `.repo` examples with:
 
 ## Alpine behavior
 
-Alpine mirrors use rsync and preserve Alpine's repository index/signature files. The default profile mirrors only `x86_64` instead of every architecture; add architectures under the Alpine profile if needed. `--delay-updates` and `--delete-delay` reduce the amount of time a repository being served during synchronization can expose a mixed old/new tree.
+Alpine mirrors use rsync and preserve Alpine's repository index/signature files. The default profile mirrors only `x86_64` instead of every architecture; add architectures under the Alpine profile if needed. Rsync's normal quick-check avoids sending unchanged file data. Partial downloads are retained under `.rsync-partial` so a rerun can reuse them without exposing an incomplete package as complete. `--delay-updates` and `--delete-delay` reduce the amount of time a repository being served during synchronization can expose a mixed old/new tree.
 
 ## Serving the repository
 
-Any static HTTP server can serve the configured `repo_root`. Example NGINX configuration:
+The built-in server is the simplest way to expose the exact same `repo_root` from the connected sync host:
+
+```bash
+./offline-repoctl serve --bind 0.0.0.0 --port 8080
+```
+
+After a successful sync, the repository root also contains a standalone copy that needs only Python 3. You can take the USB drive to the disconnected machine and serve it in place:
+
+```bash
+python3 /media/USB/OFFLINEREPO/serve-offlinerepo.py \
+  --bind 0.0.0.0 \
+  --port 8080
+```
+
+The portable server hides `apt/state/`, `logs/`, and dot-prefixed paths and disables directory listings. Those paths are synchronization state, not client-facing repository content.
+
+This is a static mirror, not an on-demand caching proxy. After the mirror has synchronized, however, clients can use the connected host or disconnected host as their single local repository endpoint in much the same practical way they would use a LAN package cache.
+
+Any other static HTTP server can serve the configured `repo_root` as well. Example NGINX configuration:
 
 ```nginx
 server {
@@ -305,7 +340,9 @@ APT clients must install `keys/offline-repo-signing-public.gpg` and reference it
 ./offline-repoctl build-images       build helper containers using config tags
 ./offline-repoctl validate           validate configuration without network/package probing
 ./offline-repoctl preflight          enumerate and probe every package in enabled repositories
-./offline-repoctl sync               sync every enabled repository
+./offline-repoctl sync               sync every enabled repository and install portable server helper
+./offline-repoctl serve [options]    serve paths.repo_root over HTTP
+./offline-repoctl install-server     refresh the portable HTTP helper in paths.repo_root
 ./offline-repoctl tui                interactive menu
 ./offline-repoctl export-snippets    print client configuration examples
 ```
@@ -314,9 +351,10 @@ APT clients must install `keys/offline-repo-signing-public.gpg` and reference it
 
 - Repository families are independent. A failure in one mirror is reported without silently claiming success.
 - Preflight continues across enabled repositories so a single run can expose the complete set of unreachable sources/packages.
-- APT snapshots retain the configured number of generations.
+- APT snapshots retain the configured number of generations and reuse aptly's deduplicated package pool.
 - RPM and APK synchronization use incremental tools and remove content that disappeared upstream.
 - APT upstream signing keys are narrowly scoped by vendor.
 - OFFLINEREPO's APT private signing key remains on the online sync host.
 - RHEL uses Red Hat's normal entitlement path without requiring Satellite.
 - CUDA platform mirrors are opt-in because they are large.
+- A synchronized `repo_root` is path-portable and can be served from USB, copied local storage, or the original connected host.
