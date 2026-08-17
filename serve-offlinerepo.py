@@ -9,6 +9,8 @@ import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
+# Keep the legacy shared APT state path hidden too. Current repository-unit
+# state uses dot-prefixed .state/ directories and is blocked generically below.
 PRIVATE_PREFIXES = (
     ("apt", "state"),
     ("logs",),
@@ -73,7 +75,7 @@ def main():
     display_host = args.bind if args.bind not in ("0.0.0.0", "::") else "HOST"
     print(f"Serving OFFLINEREPO root: {root}")
     print(f"Client base URL: http://{display_host}:{server.server_port}")
-    print("Hidden from HTTP: apt/state/, logs/, and dot-prefixed paths")
+    print("Hidden from HTTP: .state/, state manifests, legacy apt/state/, logs/, and other dot-prefixed paths")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
