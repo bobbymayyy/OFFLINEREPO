@@ -26,6 +26,7 @@ if [[ ! -d "$TARGET/apt" && ! -d "$TARGET/rpm" && ! -d "$TARGET/apk" ]]; then
   exit 1
 fi
 
-install -m 0755 "$HERE/serve-offlinerepo.py" "$TARGET/serve-offlinerepo.py"
+cp "$HERE/serve-offlinerepo.py" "$TARGET/serve-offlinerepo.py"
+chmod 0755 "$TARGET/serve-offlinerepo.py" 2>/dev/null || true
 printf 'Portable server installed: %s\n' "$TARGET/serve-offlinerepo.py"
-printf 'On the disconnected host: %q --bind 0.0.0.0 --port 8080\n' "$TARGET/serve-offlinerepo.py"
+printf 'On the disconnected host: python3 %q --bind 0.0.0.0 --port 8080\n' "$TARGET/serve-offlinerepo.py"
