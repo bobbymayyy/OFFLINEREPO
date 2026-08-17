@@ -122,6 +122,34 @@ for item in cfg.get('rpm', []) or []:
 PYCFG
 }
 
+py_enabled_unit_ids() {
+  python3 - "$CFG" <<'PYCFG'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
+for distro in cfg.get('apt', []) or []:
+    if not distro.get('enabled', False):
+        continue
+    profile = str(distro.get('name', '')).strip()
+    for mirror in distro.get('mirrors', []) or []:
+        if mirror.get('enabled', True):
+            print(f"apt:{profile}:{mirror['mirror_name']}")
+for distro in cfg.get('rpm', []) or []:
+    if not distro.get('enabled', False):
+        continue
+    profile = str(distro.get('name', '')).strip()
+    for repo in distro.get('repos', []) or []:
+        if repo.get('enabled', True):
+            print(f"rpm:{profile}:{repo['repoid']}")
+for distro in cfg.get('apk', []) or []:
+    if not distro.get('enabled', False):
+        continue
+    profile = str(distro.get('name', '')).strip()
+    for mirror in distro.get('mirrors', []) or []:
+        if mirror.get('enabled', True):
+            print(f"apk:{profile}:{mirror['mirror_name']}")
+PYCFG
+}
+
 validate_repo_root() {
   local repo_root="$1"
   [[ -n "$repo_root" ]] || { echo "paths.repo_root is empty in config.yml" >&2; return 1; }
@@ -466,12 +494,44 @@ show_state() {
   python3 "$HERE/lib/unit_state.py" show "$repo_root"
 }
 
+hydrate_from_permanent() {
+  local repo_root permanent unit_id
+  local -a missing=() args=()
+  repo_root="$(py_get_path paths.repo_root)"
+  permanent="$(py_get_path paths.permanent_root)"
+  [[ -n "$permanent" && -d "$permanent" ]] || return 0
+  validate_repo_root "$repo_root"
+  [[ "$repo_root" != "$permanent" ]] || return 0
+
+  while IFS= read -r unit_id; do
+    [[ -n "$unit_id" ]] || continue
+    if ! python3 "$HERE/lib/unit_state.py" has "$repo_root" "$unit_id"; then
+      missing+=("$unit_id")
+    fi
+  done < <(py_enabled_unit_ids)
+
+  [[ "${#missing[@]}" -gt 0 ]] || return 0
+  log "[INFO] restoring ${#missing[@]} enabled repository unit(s) from paths.permanent_root before sync"
+  for unit_id in "${missing[@]}"; do
+    args+=(--unit "$unit_id")
+  done
+  python3 "$HERE/lib/offload-offlinerepo.py" \
+    --source "$permanent" \
+    --ignore-missing-units \
+    "${args[@]}" \
+    "$repo_root" |& tee -a "$HERE/logs/hydrate_permanent.log"
+}
+
 sync_permanent() {
   local repo_root permanent
   repo_root="$(py_get_path paths.repo_root)"
   permanent="$(py_get_path paths.permanent_root)"
   [[ -n "$permanent" ]] || return 0
   validate_repo_root "$repo_root"
+  [[ "$repo_root" != "$permanent" ]] || {
+    echo "paths.permanent_root must differ from paths.repo_root" >&2
+    return 1
+  }
   mkdir -p "$permanent"
   python3 "$HERE/lib/offload-offlinerepo.py" --source "$repo_root" "$permanent" \
     |& tee -a "$HERE/logs/sync_permanent.log"
@@ -539,9 +599,13 @@ validate_config() {
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1], 'r', encoding='utf-8')) or {}
 errors = []
-root = str((cfg.get('paths', {}) or {}).get('repo_root', ''))
+paths_cfg = cfg.get('paths', {}) or {}
+root = str(paths_cfg.get('repo_root', ''))
+permanent = str(paths_cfg.get('permanent_root', '')).strip()
 if not root or '<user>' in root:
     errors.append('paths.repo_root is unset or still contains <user>')
+if permanent and permanent == root:
+    errors.append('paths.permanent_root must differ from paths.repo_root')
 
 for family in ('apt', 'rpm', 'apk'):
     names = []
@@ -661,6 +725,7 @@ sync_all() {
   log "[INFO] sync_all started run=$OFFLINEREPO_RUN_ID"
 
   local rc=0
+  hydrate_from_permanent || rc=1
   if [[ "$(py_bool_any_enabled apt)" == yes ]]; then
     sync_apt || rc=1
   fi
