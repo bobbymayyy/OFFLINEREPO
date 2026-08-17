@@ -419,6 +419,33 @@ preflight_apk() {
   fi
 }
 
+install_portable_server() {
+  local repo_root target
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
+  mkdir -p "$repo_root"
+  [[ -f "$HERE/serve-offlinerepo.py" ]] || {
+    echo "Portable server source missing: $HERE/serve-offlinerepo.py" >&2
+    return 1
+  }
+  target="$repo_root/serve-offlinerepo.py"
+  cp "$HERE/serve-offlinerepo.py" "$target"
+  chmod 0755 "$target" 2>/dev/null || true
+  log "[INFO] installed portable HTTP server at $target"
+}
+
+serve_repo() {
+  local repo_root
+  need python3
+  repo_root="$(py_get_path paths.repo_root)"
+  validate_repo_root "$repo_root"
+  [[ -d "$repo_root" ]] || {
+    echo "Repository root does not exist: $repo_root" >&2
+    return 1
+  }
+  exec python3 "$HERE/serve-offlinerepo.py" --root "$repo_root" "$@"
+}
+
 sync_permanent() {
   local repo_root permanent
   repo_root="$(py_get_path paths.repo_root)"
@@ -596,6 +623,7 @@ sync_all() {
   [[ "$(py_bool_any_enabled rpm)" == yes ]] && sync_rpm
   [[ "$(py_bool_any_enabled apk)" == yes ]] && sync_apk
 
+  install_portable_server
   sync_permanent
   log "[INFO] sync_all finished"
 }
@@ -657,6 +685,11 @@ case "${1:-}" in
   preflight) preflight_all ;;
   tui) tui ;;
   sync) sync_all ;;
+  serve)
+    shift
+    serve_repo "$@"
+    ;;
+  install-server) install_portable_server ;;
   show-config) show_config ;;
   edit-config) edit_config ;;
   export-snippets) export_snippets ;;
@@ -667,7 +700,9 @@ Usage:
   $0 build-images       # build the configured APT/RPM helper images
   $0 validate           # validate config.yml without network/package probing
   $0 preflight          # enumerate and probe every package in enabled repositories
-  $0 sync               # sync all enabled repositories
+  $0 sync               # sync all enabled repositories and install portable server helper
+  $0 serve [options]    # serve paths.repo_root over HTTP (default 0.0.0.0:8080)
+  $0 install-server     # copy portable HTTP helper into paths.repo_root
   $0 tui
   $0 show-config
   $0 edit-config
