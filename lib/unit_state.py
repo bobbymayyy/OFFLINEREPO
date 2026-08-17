@@ -147,9 +147,14 @@ def main() -> int:
     p_show.add_argument("repo_root")
     p_index = sub.add_parser("index")
     p_index.add_argument("repo_root")
+    p_has = sub.add_parser("has")
+    p_has.add_argument("repo_root")
+    p_has.add_argument("unit_id")
     args = parser.parse_args()
     if args.command == "show":
         return show(args.repo_root)
+    if args.command == "has":
+        return 0 if any(item.get("unit_id") == args.unit_id for item in iter_units(args.repo_root)) else 1
     rebuild_index(args.repo_root)
     return 0
 
