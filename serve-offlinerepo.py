@@ -9,7 +9,8 @@ import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
-PUBLIC_TOP_LEVEL = {"apt", "rpm", "apk", "keys"}
+PUBLIC_ROOT_TOP_LEVEL = {"apt", "rpm", "apk", "keys"}
+UNIT_FILE = ".offlinerepo-unit.json"
 
 # Keep the legacy shared APT state path hidden too. Current repository-unit
 # state uses dot-prefixed .state/ directories and is blocked generically below.
@@ -21,6 +22,10 @@ PRIVATE_PREFIXES = (
 
 class RepoHandler(SimpleHTTPRequestHandler):
     """Static handler that exposes package content and hides operational files."""
+
+    def __init__(self, *args, repository_root_mode=True, **kwargs):
+        self.repository_root_mode = repository_root_mode
+        super().__init__(*args, **kwargs)
 
     def _request_parts(self):
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
@@ -34,7 +39,11 @@ class RepoHandler(SimpleHTTPRequestHandler):
 
     def _is_public_repository_path(self):
         parts = self._request_parts()
-        return bool(parts) and parts[0] in PUBLIC_TOP_LEVEL and not self._is_private()
+        if not parts or self._is_private():
+            return False
+        if self.repository_root_mode:
+            return parts[0] in PUBLIC_ROOT_TOP_LEVEL
+        return True
 
     def send_head(self):
         if not self._is_public_repository_path():
@@ -55,7 +64,7 @@ def parse_args():
     parser.add_argument(
         "--root",
         default=str(default_root),
-        help="repository root (default: directory containing this script)",
+        help="repository root or individual repository-unit root (default: directory containing this script)",
     )
     parser.add_argument("--bind", default="0.0.0.0", help="address to bind")
     parser.add_argument("--port", type=int, default=8080, help="TCP port")
@@ -69,19 +78,27 @@ def main():
         print(f"Repository root does not exist or is not a directory: {root}", file=sys.stderr)
         return 2
 
-    known = [name for name in PUBLIC_TOP_LEVEL if (root / name).exists()]
-    if not known:
+    unit_mode = (root / UNIT_FILE).is_file()
+    known = [name for name in PUBLIC_ROOT_TOP_LEVEL if (root / name).exists()]
+    if not unit_mode and not known:
         print(
             f"Warning: {root} does not currently contain apt/, rpm/, apk/, or keys/.",
             file=sys.stderr,
         )
 
-    handler = functools.partial(RepoHandler, directory=str(root))
+    handler = functools.partial(
+        RepoHandler,
+        directory=str(root),
+        repository_root_mode=not unit_mode,
+    )
     server = ThreadingHTTPServer((args.bind, args.port), handler)
     display_host = args.bind if args.bind not in ("0.0.0.0", "::") else "HOST"
     print(f"Serving OFFLINEREPO root: {root}")
     print(f"Client base URL: http://{display_host}:{server.server_port}")
-    print("Exposed over HTTP: apt/, rpm/, apk/, keys/ package content only")
+    if unit_mode:
+        print("Serving mode: individual repository unit")
+    else:
+        print("Serving mode: repository root; exposed top-level paths are apt/, rpm/, apk/, keys/ only")
     print("Hidden from HTTP: checkout/config files, .state/, state manifests, legacy apt/state/, logs/, and dot-prefixed paths")
     print("Press Ctrl+C to stop.")
     try:
