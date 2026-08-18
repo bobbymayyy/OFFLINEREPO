@@ -31,9 +31,18 @@ OFFLOAD_SRC="$HERE/lib/offload-offlinerepo.py"
 [[ -f "$SERVER_SRC" ]] || { echo "Missing portable helper: $SERVER_SRC" >&2; exit 1; }
 [[ -f "$OFFLOAD_SRC" ]] || { echo "Missing portable helper: $OFFLOAD_SRC" >&2; exit 1; }
 
-cp "$SERVER_SRC" "$TARGET/serve-offlinerepo.py"
-cp "$OFFLOAD_SRC" "$TARGET/offload-offlinerepo.py"
-chmod 0755 "$TARGET/serve-offlinerepo.py" "$TARGET/offload-offlinerepo.py" 2>/dev/null || true
+install_helper() {
+  local source="$1" destination="$2"
+  if [[ -e "$destination" && "$source" -ef "$destination" ]]; then
+    printf 'Portable helper already in place: %s\n' "$destination"
+  else
+    cp "$source" "$destination"
+  fi
+  chmod 0755 "$destination" 2>/dev/null || true
+}
+
+install_helper "$SERVER_SRC" "$TARGET/serve-offlinerepo.py"
+install_helper "$OFFLOAD_SRC" "$TARGET/offload-offlinerepo.py"
 
 printf 'Portable server installed: %s\n' "$TARGET/serve-offlinerepo.py"
 printf 'Portable offload helper installed: %s\n' "$TARGET/offload-offlinerepo.py"
