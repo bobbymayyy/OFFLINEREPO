@@ -336,10 +336,11 @@ def trim_snapshots(aptly_cfg_path, actual_mirror_name, keep_n, cmd_timeout):
         aptly_cmd(aptly_cfg_path, "snapshot", "list", "-raw"),
         timeout=cmd_timeout,
     ).stdout.splitlines()
+    snapshot_pattern = re.compile(
+        rf"^{re.escape(actual_mirror_name)}-\d{{8}}-\d{{6}}$"
+    )
     matching = sorted(
-        snapshot
-        for snapshot in snapshots
-        if snapshot.startswith(actual_mirror_name + "-")
+        snapshot for snapshot in snapshots if snapshot_pattern.fullmatch(snapshot)
     )
     for snapshot in matching[: max(0, len(matching) - keep_n)]:
         run(
