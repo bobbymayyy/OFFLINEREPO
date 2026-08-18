@@ -9,6 +9,8 @@ import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
+PUBLIC_TOP_LEVEL = {"apt", "rpm", "apk", "keys"}
+
 # Keep the legacy shared APT state path hidden too. Current repository-unit
 # state uses dot-prefixed .state/ directories and is blocked generically below.
 PRIVATE_PREFIXES = (
@@ -18,7 +20,7 @@ PRIVATE_PREFIXES = (
 
 
 class RepoHandler(SimpleHTTPRequestHandler):
-    """Static handler that hides OFFLINEREPO operational state."""
+    """Static handler that exposes package content and hides operational files."""
 
     def _request_parts(self):
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
@@ -30,8 +32,12 @@ class RepoHandler(SimpleHTTPRequestHandler):
             return True
         return any(parts[: len(prefix)] == prefix for prefix in PRIVATE_PREFIXES)
 
+    def _is_public_repository_path(self):
+        parts = self._request_parts()
+        return bool(parts) and parts[0] in PUBLIC_TOP_LEVEL and not self._is_private()
+
     def send_head(self):
-        if self._is_private():
+        if not self._is_public_repository_path():
             self.send_error(404, "Not found")
             return None
         return super().send_head()
@@ -63,7 +69,7 @@ def main():
         print(f"Repository root does not exist or is not a directory: {root}", file=sys.stderr)
         return 2
 
-    known = [name for name in ("apt", "rpm", "apk", "keys") if (root / name).exists()]
+    known = [name for name in PUBLIC_TOP_LEVEL if (root / name).exists()]
     if not known:
         print(
             f"Warning: {root} does not currently contain apt/, rpm/, apk/, or keys/.",
@@ -75,7 +81,8 @@ def main():
     display_host = args.bind if args.bind not in ("0.0.0.0", "::") else "HOST"
     print(f"Serving OFFLINEREPO root: {root}")
     print(f"Client base URL: http://{display_host}:{server.server_port}")
-    print("Hidden from HTTP: .state/, state manifests, legacy apt/state/, logs/, and other dot-prefixed paths")
+    print("Exposed over HTTP: apt/, rpm/, apk/, keys/ package content only")
+    print("Hidden from HTTP: checkout/config files, .state/, state manifests, legacy apt/state/, logs/, and dot-prefixed paths")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
