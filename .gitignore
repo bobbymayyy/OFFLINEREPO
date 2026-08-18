@@ -3,6 +3,14 @@ logs/
 __pycache__/
 *.py[cod]
 
+# Runtime repository data when the checkout itself is paths.repo_root.
+/apt/
+/rpm/
+/apk/
+/keys/
+/.offlinerepo-index.json
+/offload-offlinerepo.py
+
 # Never commit repository signing secrets.
 *repo-signing-private*
 *signing-passphrase*

@@ -67,6 +67,32 @@ For example, on the first trip enable Debian and Kali plus the exact APT mirrors
 
 On a later trip, change `config.yml` so Proxmox and Rocky are enabled and the earlier profiles are disabled if they are not needed on that trip. Running the same `./offline-repoctl sync` creates or updates those selected units.
 
+## Checkout as the repository root
+
+Cloning OFFLINEREPO directly onto the staging or removable filesystem and setting `paths.repo_root` to that same checkout directory is a supported first-class layout:
+
+```text
+/media/USB/OFFLINEREPO/
+├── .git/
+├── config.yml
+├── offline-repoctl
+├── serve-offlinerepo.py
+├── lib/
+├── apt/                     # runtime repository data
+├── rpm/                     # runtime repository data
+├── apk/                     # runtime repository data
+├── keys/                    # generated public keys
+└── .offlinerepo-index.json
+```
+
+In this layout, `./offline-repoctl sync` recognizes when a portable helper is already the exact same file as its destination and treats that helper as already installed. Re-running sync or `./offline-repoctl install-helpers` is therefore idempotent instead of failing with a same-file `cp` error.
+
+The checkout's root-level runtime directories and generated helper/state files are ignored by Git, so mirrored package content does not flood `git status` or become an accidental normal `git add` target.
+
+The built-in HTTP server exposes only `apt/`, `rpm/`, `apk/`, and `keys/`. Source/configuration files such as `config.yml`, `offline-repoctl`, README files, and the Git checkout itself are not served even when the checkout and repository root are the same directory.
+
+A separate data-only `paths.repo_root` remains equally supported. The checkout-root layout is simply another intentional operating mode.
+
 ## Serve directly from removable media
 
 A successful sync leaves the portable HTTP helper in the repository root:

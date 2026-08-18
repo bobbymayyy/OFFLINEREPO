@@ -453,6 +453,16 @@ preflight_apk() {
   fi
 }
 
+install_portable_helper() {
+  local source="$1" destination="$2"
+  if [[ -e "$destination" && "$source" -ef "$destination" ]]; then
+    log "[INFO] portable helper already in place: $destination"
+  else
+    cp "$source" "$destination"
+  fi
+  chmod 0755 "$destination" 2>/dev/null || true
+}
+
 install_portable_helpers() {
   local repo_root
   repo_root="$(py_get_path paths.repo_root)"
@@ -468,9 +478,8 @@ install_portable_helpers() {
     return 1
   }
 
-  cp "$HERE/serve-offlinerepo.py" "$repo_root/serve-offlinerepo.py"
-  cp "$HERE/lib/offload-offlinerepo.py" "$repo_root/offload-offlinerepo.py"
-  chmod 0755 "$repo_root/serve-offlinerepo.py" "$repo_root/offload-offlinerepo.py" 2>/dev/null || true
+  install_portable_helper "$HERE/serve-offlinerepo.py" "$repo_root/serve-offlinerepo.py"
+  install_portable_helper "$HERE/lib/offload-offlinerepo.py" "$repo_root/offload-offlinerepo.py"
   python3 "$HERE/lib/unit_state.py" index "$repo_root"
   log "[INFO] installed portable HTTP/offload helpers in $repo_root"
 }
