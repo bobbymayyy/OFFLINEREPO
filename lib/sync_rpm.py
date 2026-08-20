@@ -2,6 +2,7 @@
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -11,9 +12,63 @@ import yaml
 from unit_state import record_unit
 
 
+def stop_process_group(proc: subprocess.Popen, grace_sec: int = 10) -> None:
+    """Forward an interrupt to the whole child process group, then reap it."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            return
+
+    try:
+        proc.wait(timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    print("! child did not stop after SIGINT; sending SIGTERM", file=sys.stderr, flush=True)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("! child did not stop after SIGTERM; sending SIGKILL", file=sys.stderr, flush=True)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
+        proc.wait()
+
+
 def run(cmd, check=True):
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, check=check)
+    proc = subprocess.Popen(cmd, start_new_session=True)
+    try:
+        returncode = proc.wait()
+    except KeyboardInterrupt:
+        print(
+            "! interrupted: stopping reposync cleanly; completed RPMs remain in place and will be reused on restart",
+            file=sys.stderr,
+            flush=True,
+        )
+        stop_process_group(proc)
+        raise
+
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+    return subprocess.CompletedProcess(cmd, returncode)
 
 
 def main():
@@ -86,7 +141,13 @@ def main():
 
             # reposync is deliberately incremental: both DNF4 and DNF5 avoid
             # re-downloading RPM payloads that are already present in the
-            # destination. --remote-time also preserves upstream timestamps.
+            # destination. --remote-time preserves upstream timestamps.
+            #
+            # The first pass is additive and does NOT use --delete. That means
+            # Ctrl+C cannot prune a previously complete repository before all
+            # replacement payloads arrive. A second success-only pass performs
+            # the stale-package deletion after the repository has been fully
+            # refreshed.
             cmd += [
                 "reposync",
                 "--repoid", repoid,
@@ -95,17 +156,28 @@ def main():
                 "--destdir" if is_dnf5 else "--download-path", str(outdir),
                 "--download-metadata",
                 "--remote-time",
-                "--delete",
             ]
 
             if repo.get("verify_packages", False):
                 cmd.append("--gpgcheck")
 
+            print(
+                f"\n=== RPM {name}/{repoid}: incremental payload sync ===\n"
+                "Completed RPMs are reused after restart; stale-package deletion is deferred until this pass succeeds.",
+                flush=True,
+            )
             run(cmd)
+
+            print(
+                f"\n=== RPM {name}/{repoid}: success-only stale-package prune ===",
+                flush=True,
+            )
+            run(cmd + ["--delete"])
 
             # DNF reposync stores each repository under a subdirectory named
             # after its repo ID. That directory is a complete, independently
-            # transferable repository unit.
+            # transferable repository unit. It is recorded only after both the
+            # payload sync and stale-package prune complete successfully.
             unit_dir = outdir / repoid
             if not unit_dir.is_dir():
                 raise RuntimeError(
