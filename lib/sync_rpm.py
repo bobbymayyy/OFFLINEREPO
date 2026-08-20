@@ -143,18 +143,17 @@ def main():
             # re-downloading RPM payloads that are already present in the
             # destination. --remote-time preserves upstream timestamps.
             #
-            # The first pass is additive and does NOT use --delete. That means
-            # Ctrl+C cannot prune a previously complete repository before all
-            # replacement payloads arrive. A second success-only pass performs
-            # the stale-package deletion after the repository has been fully
-            # refreshed.
+            # The first pass downloads payloads only. It does not refresh the
+            # published repodata and does not delete stale packages, so Ctrl+C
+            # leaves any previously complete repository metadata usable. Once
+            # every current payload is present, the second pass refreshes
+            # metadata and performs the stale-package prune.
             cmd += [
                 "reposync",
                 "--repoid", repoid,
                 "--arch", arch,
                 "--arch", "noarch",
                 "--destdir" if is_dnf5 else "--download-path", str(outdir),
-                "--download-metadata",
                 "--remote-time",
             ]
 
@@ -163,21 +162,21 @@ def main():
 
             print(
                 f"\n=== RPM {name}/{repoid}: incremental payload sync ===\n"
-                "Completed RPMs are reused after restart; stale-package deletion is deferred until this pass succeeds.",
+                "Completed RPMs are reused after restart; existing repodata and stale packages are left untouched until this pass succeeds.",
                 flush=True,
             )
             run(cmd)
 
             print(
-                f"\n=== RPM {name}/{repoid}: success-only stale-package prune ===",
+                f"\n=== RPM {name}/{repoid}: metadata refresh and stale-package prune ===",
                 flush=True,
             )
-            run(cmd + ["--delete"])
+            run(cmd + ["--download-metadata", "--delete"])
 
             # DNF reposync stores each repository under a subdirectory named
             # after its repo ID. That directory is a complete, independently
             # transferable repository unit. It is recorded only after both the
-            # payload sync and stale-package prune complete successfully.
+            # payload sync and metadata/prune pass complete successfully.
             unit_dir = outdir / repoid
             if not unit_dir.is_dir():
                 raise RuntimeError(
