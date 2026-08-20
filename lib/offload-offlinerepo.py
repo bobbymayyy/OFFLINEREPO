@@ -273,6 +273,22 @@ def prune_empty_family_dirs(source: pathlib.Path) -> None:
                 pass
 
 
+def paths_overlap(a: pathlib.Path, b: pathlib.Path) -> bool:
+    """Return True when paths are identical or either resolved path contains the other."""
+    if a == b:
+        return True
+    try:
+        a.relative_to(b)
+        return True
+    except ValueError:
+        pass
+    try:
+        b.relative_to(a)
+        return True
+    except ValueError:
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Copy complete OFFLINEREPO repository units to another storage root without combining their package-manager state.")
     parser.add_argument("destination", help="destination storage/serving root")
@@ -298,8 +314,11 @@ def main() -> int:
 
     source = pathlib.Path(args.source).expanduser().resolve()
     destination = pathlib.Path(args.destination).expanduser().resolve()
-    if source == destination:
-        parser.error("source and destination must be different")
+    if paths_overlap(source, destination):
+        parser.error(
+            "source and destination must be separate, non-nested storage roots; "
+            f"got source={source} destination={destination}"
+        )
     if not source.is_dir():
         parser.error(f"source does not exist: {source}")
 
