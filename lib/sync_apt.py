@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
+from collections import deque
 import json
 import os
 import pathlib
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +38,120 @@ def _is_retryable(stderr: str, stdout: str) -> bool:
     return any(re.search(pattern, text) for pattern in RETRYABLE_PATTERNS)
 
 
+def _stop_process_group(
+    proc: subprocess.Popen,
+    first_signal: int = signal.SIGINT,
+    grace_sec: int = 10,
+) -> None:
+    """Stop a child process group without abandoning package-manager state."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, first_signal)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(first_signal)
+        except ProcessLookupError:
+            return
+
+    try:
+        proc.wait(timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    print("! child did not stop cleanly; sending SIGTERM", file=sys.stderr, flush=True)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("! child still running; sending SIGKILL", file=sys.stderr, flush=True)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
+        proc.wait()
+
+
+def _stream_pipe(pipe, target, capture: deque) -> None:
+    try:
+        for line in iter(pipe.readline, ""):
+            capture.append(line)
+            target.write(line)
+            target.flush()
+    finally:
+        pipe.close()
+
+
+def _run_streaming(
+    cmd: List[str],
+    timeout: Optional[int],
+    env: Optional[Dict[str, str]],
+) -> subprocess.CompletedProcess:
+    """Tee child output live while retaining enough output for callers/retries."""
+    stdout_tail: deque = deque(maxlen=10000)
+    stderr_tail: deque = deque(maxlen=10000)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=env,
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    stdout_thread = threading.Thread(
+        target=_stream_pipe,
+        args=(proc.stdout, sys.stdout, stdout_tail),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_stream_pipe,
+        args=(proc.stderr, sys.stderr, stderr_tail),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except KeyboardInterrupt:
+        print(
+            "! interrupted: forwarding Ctrl+C to aptly; downloaded package-pool data is retained for the next mirror update",
+            file=sys.stderr,
+            flush=True,
+        )
+        _stop_process_group(proc, signal.SIGINT)
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        raise
+    except subprocess.TimeoutExpired:
+        _stop_process_group(proc, signal.SIGTERM)
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        raise
+
+    stdout_thread.join()
+    stderr_thread.join()
+    return subprocess.CompletedProcess(
+        cmd,
+        returncode,
+        stdout="".join(stdout_tail),
+        stderr="".join(stderr_tail),
+    )
+
+
 def run(
     cmd: List[str],
     check: bool = True,
@@ -48,14 +165,7 @@ def run(
         attempt += 1
         print("+", " ".join(cmd), flush=True)
         try:
-            cp = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
+            cp = _run_streaming(cmd, timeout=timeout, env=env)
             if cp.returncode == 0:
                 return cp
 
@@ -64,7 +174,7 @@ def run(
                 print(
                     f"! retryable failure (attempt {attempt}/{retries + 1}), "
                     f"sleeping {delay:.1f}s\n"
-                    f"  exit={cp.returncode}\n  stderr={(cp.stderr or '').strip()[:500]}",
+                    f"  exit={cp.returncode}\n  stderr={(cp.stderr or '').strip()[-500:]}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -72,11 +182,11 @@ def run(
                 continue
 
             if check:
-                print(f"! command failed exit={cp.returncode}", file=sys.stderr, flush=True)
-                if cp.stdout:
-                    print("! stdout:\n" + cp.stdout[-2000:], file=sys.stderr, flush=True)
-                if cp.stderr:
-                    print("! stderr:\n" + cp.stderr[-2000:], file=sys.stderr, flush=True)
+                print(
+                    f"! command failed exit={cp.returncode}; command output was streamed above",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 raise subprocess.CalledProcessError(
                     cp.returncode, cmd, output=cp.stdout, stderr=cp.stderr
                 )
@@ -350,6 +460,16 @@ def trim_snapshots(aptly_cfg_path, actual_mirror_name, keep_n, cmd_timeout):
         )
 
 
+def drop_snapshots_best_effort(aptly_cfg_path, snapshots, cmd_timeout):
+    """Remove current-run snapshots that were never successfully published."""
+    for snapshot in snapshots:
+        run(
+            aptly_cmd(aptly_cfg_path, "snapshot", "drop", snapshot),
+            check=False,
+            timeout=cmd_timeout,
+        )
+
+
 def main():
     cfg_path = os.environ.get("CFG", "/work/config.yml")
     repo_root = os.environ.get("REPO_ROOT")
@@ -431,6 +551,7 @@ def main():
                 unit_root = apt_root / distro_name / mirror_name
                 unit_root.mkdir(parents=True, exist_ok=True)
                 aptly_cfg_path = write_aptly_config(unit_root, cfg)
+                snapshot_names = []
 
                 try:
                     keyrings = compute_keyrings(cfg, distro, mirror)
@@ -443,7 +564,6 @@ def main():
                     keyring_args = keyring_flags(keyrings)
 
                     specs = mirror_specs(mirror_name, distribution, mirror)
-                    snapshot_names = []
                     publish_components = []
                     actual_mirror_names = []
                     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -485,6 +605,11 @@ def main():
                                 create.append(spec["source_component"])
                             run(create, timeout=cmd_timeout)
 
+                        print(
+                            f"\n=== APT {distro_name}/{mirror_name}: {actual_name} mirror update ===\n"
+                            "aptly output is streamed live; an interrupted update reuses downloaded package-pool data on restart.",
+                            flush=True,
+                        )
                         run(
                             aptly_cmd(
                                 aptly_cfg_path,
@@ -569,6 +694,15 @@ def main():
                             cmd_timeout,
                         )
 
+                    print(
+                        f"\n=== APT {distro_name}/{mirror_name}: reclaiming unreferenced package-pool data ===",
+                        flush=True,
+                    )
+                    run(
+                        aptly_cmd(aptly_cfg_path, "db", "cleanup"),
+                        timeout=cmd_timeout,
+                    )
+
                     copy_public_keys_to_unit(repo_root, unit_root)
                     record_unit(
                         repo_root,
@@ -587,7 +721,24 @@ def main():
                         },
                     )
 
+                except KeyboardInterrupt:
+                    print(
+                        f"! interrupted {distro_name}/{mirror_name}; removing only current-run unpublished snapshots before exit",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    drop_snapshots_best_effort(
+                        aptly_cfg_path,
+                        snapshot_names,
+                        cmd_timeout,
+                    )
+                    raise
                 except Exception as exc:
+                    drop_snapshots_best_effort(
+                        aptly_cfg_path,
+                        snapshot_names,
+                        cmd_timeout,
+                    )
                     failures.append((distro_name, mirror_name, str(exc)))
                     print(
                         f"! FAILED {distro_name}/{mirror_name}: {exc}",
