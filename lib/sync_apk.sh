@@ -5,7 +5,7 @@ CFG="${CFG:-/work/config.yml}"
 REPO_ROOT="${REPO_ROOT:?REPO_ROOT env missing}"
 export CFG REPO_ROOT
 
-python3 - <<'PY'
+exec python3 - <<'PY'
 import os
 import pathlib
 import signal
