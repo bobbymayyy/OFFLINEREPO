@@ -2,16 +2,73 @@
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.request
 
 import yaml
 
+from unit_state import record_unit
+
+
+def stop_process_group(proc: subprocess.Popen, grace_sec: int = 10) -> None:
+    """Forward an interrupt to the whole child process group, then reap it."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            return
+
+    try:
+        proc.wait(timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    print("! child did not stop after SIGINT; sending SIGTERM", file=sys.stderr, flush=True)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("! child did not stop after SIGTERM; sending SIGKILL", file=sys.stderr, flush=True)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
+        proc.wait()
+
 
 def run(cmd, check=True):
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, check=check)
+    proc = subprocess.Popen(cmd, start_new_session=True)
+    try:
+        returncode = proc.wait()
+    except KeyboardInterrupt:
+        print(
+            "! interrupted: stopping reposync cleanly; completed RPMs remain in place and will be reused on restart",
+            file=sys.stderr,
+            flush=True,
+        )
+        stop_process_group(proc)
+        raise
+
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+    return subprocess.CompletedProcess(cmd, returncode)
 
 
 def main():
@@ -56,7 +113,7 @@ def main():
                 key_dir.mkdir(parents=True, exist_ok=True)
                 local_gpgkey = key_dir / f"{name}-{repoid}.pub"
                 tmp_key = local_gpgkey.with_suffix(local_gpgkey.suffix + ".tmp")
-                print(f"+ download {gpgkey_url} -> {local_gpgkey}", flush=True)
+                print(f"+ refresh {gpgkey_url} -> {local_gpgkey}", flush=True)
                 with urllib.request.urlopen(gpgkey_url, timeout=60) as response:
                     tmp_key.write_bytes(response.read())
                 if tmp_key.stat().st_size < 256:
@@ -82,20 +139,64 @@ def main():
                     f"--setopt={repoid}.gpgkey=file://{local_gpgkey}",
                 ]
 
+            # reposync is deliberately incremental: both DNF4 and DNF5 avoid
+            # re-downloading RPM payloads that are already present in the
+            # destination. --remote-time preserves upstream timestamps.
+            #
+            # The first pass downloads payloads only. It does not refresh the
+            # published repodata and does not delete stale packages, so Ctrl+C
+            # leaves any previously complete repository metadata usable. Once
+            # every current payload is present, the second pass refreshes
+            # metadata and performs the stale-package prune.
             cmd += [
                 "reposync",
                 "--repoid", repoid,
                 "--arch", arch,
                 "--arch", "noarch",
                 "--destdir" if is_dnf5 else "--download-path", str(outdir),
-                "--download-metadata",
-                "--delete",
+                "--remote-time",
             ]
 
             if repo.get("verify_packages", False):
                 cmd.append("--gpgcheck")
 
+            print(
+                f"\n=== RPM {name}/{repoid}: incremental payload sync ===\n"
+                "Completed RPMs are reused after restart; existing repodata and stale packages are left untouched until this pass succeeds.",
+                flush=True,
+            )
             run(cmd)
+
+            print(
+                f"\n=== RPM {name}/{repoid}: metadata refresh and stale-package prune ===",
+                flush=True,
+            )
+            run(cmd + ["--download-metadata", "--delete"])
+
+            # DNF reposync stores each repository under a subdirectory named
+            # after its repo ID. That directory is a complete, independently
+            # transferable repository unit. It is recorded only after both the
+            # payload sync and metadata/prune pass complete successfully.
+            unit_dir = outdir / repoid
+            if not unit_dir.is_dir():
+                raise RuntimeError(
+                    f"reposync completed but expected repository directory is missing: {unit_dir}"
+                )
+            record_unit(
+                repo_root,
+                family="rpm",
+                profile=name,
+                name=repoid,
+                relative_path=unit_dir.relative_to(pathlib.Path(repo_root)).as_posix(),
+                metadata={
+                    "repoid": repoid,
+                    "releasever": releasever,
+                    "architecture": arch,
+                    "baseurl": baseurl or None,
+                    "package_gpgcheck": bool(repo.get("verify_packages", False)),
+                    "gpgkey_url": gpgkey_url or None,
+                },
+            )
 
     return 0
 
