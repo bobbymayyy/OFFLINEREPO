@@ -469,8 +469,8 @@ install_portable_helpers() {
   validate_repo_root "$repo_root"
   mkdir -p "$repo_root"
 
-  [[ -f "$HERE/serve-offlinerepo.py" ]] || {
-    echo "Portable server source missing: $HERE/serve-offlinerepo.py" >&2
+  [[ -f "$HERE/lib/serve-offlinerepo.py" ]] || {
+    echo "Portable server source missing: $HERE/lib/serve-offlinerepo.py" >&2
     return 1
   }
   [[ -f "$HERE/lib/offload-offlinerepo.py" ]] || {
@@ -478,7 +478,7 @@ install_portable_helpers() {
     return 1
   }
 
-  install_portable_helper "$HERE/serve-offlinerepo.py" "$repo_root/serve-offlinerepo.py"
+  install_portable_helper "$HERE/lib/serve-offlinerepo.py" "$repo_root/serve-offlinerepo.py"
   install_portable_helper "$HERE/lib/offload-offlinerepo.py" "$repo_root/offload-offlinerepo.py"
   python3 "$HERE/lib/unit_state.py" index "$repo_root"
   log "[INFO] installed portable HTTP/offload helpers in $repo_root"
@@ -493,7 +493,7 @@ serve_repo() {
     echo "Repository root does not exist: $repo_root" >&2
     return 1
   }
-  exec python3 "$HERE/serve-offlinerepo.py" --root "$repo_root" "$@"
+  exec python3 "$HERE/lib/serve-offlinerepo.py" --root "$repo_root" "$@"
 }
 
 show_state() {
