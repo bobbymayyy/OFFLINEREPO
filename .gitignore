@@ -9,6 +9,7 @@ __pycache__/
 /apk/
 /keys/
 /.offlinerepo-index.json
+/serve-offlinerepo.py
 /offload-offlinerepo.py
 
 # Never commit repository signing secrets.
